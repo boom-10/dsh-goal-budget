@@ -133,6 +133,15 @@ const entry = registry.find(r => r.id === 'goal-budget')
 assert.ok(entry, '❌ 没有把 pill 注册进 conversation.composer.dock')
 const Pill = entry.component as (props: Record<string, unknown>) => El | null
 
+/** 点击 pill：把它的 onClick 当作函数调用（props 是 unknown，需要收窄）。 */
+function clickPill(out: El | null): void {
+  const kids = (out as El).props['children']
+  const pill = (Array.isArray(kids) ? kids[0] : kids) as El
+  const onClick = pill.props['onClick']
+  assert.equal(typeof onClick, 'function', '❌ pill 没有 onClick')
+  ;(onClick as () => void)()
+}
+
 /** 递归收集文本。 */
 function textOf(node: unknown): string {
   if (node === null || node === undefined) return ''
@@ -195,10 +204,8 @@ const view = (k: string) => (k === 'goalBudget' ? HOSTED : undefined)
 {
   remount()
   const out = render(Pill, { useProjection: view }) as El
-  const kids = out.props['children'] as El[]
-  const pillEl = (Array.isArray(kids) ? kids[0] : kids) as El
   // 模拟点击
-  ;(pillEl.props['onClick'] as () => void)()
+  clickPill(out)
   // 点击后 React 会重渲染 —— 这里显式再渲染一次
   const opened = render(Pill, { useProjection: view }) as El
   const openedKids = opened.props['children'] as unknown[]
@@ -227,8 +234,7 @@ const view = (k: string) => (k === 'goalBudget' ? HOSTED : undefined)
   remount()
   posOverride = null   // 模拟「钩子还没量到」的首帧
   const out = render(Pill, { useProjection: view }) as El
-  const kids = out.props['children'] as El[]
-  ;((Array.isArray(kids) ? kids[0] : kids) as El).props['onClick']!()
+  clickPill(out)
   const opened = render(Pill, { useProjection: view }) as El
   const panel = findEl(opened, n => n.props['role'] === 'dialog')
   assert.ok(panel, '❌ 首帧也应渲染面板（供测量）')
@@ -242,8 +248,7 @@ const view = (k: string) => (k === 'goalBudget' ? HOSTED : undefined)
 {
   remount()
   const first = render(Pill, { useProjection: view }) as El
-  const kids = first.props['children'] as El[]
-  ;((Array.isArray(kids) ? kids[0] : kids) as El).props['onClick']!()
+  clickPill(first)
   const opened = render(Pill, { useProjection: view }) as El
   const panel = findEl(opened, n => n.props['role'] === 'dialog')
   assert.ok(panel, '❌ 找不到面板')
@@ -304,9 +309,7 @@ const view = (k: string) => (k === 'goalBudget' ? HOSTED : undefined)
       ? { budget: null, spent: { tokens: 10, costUsd: 0.5, unbilledTurns: 3 } }
       : undefined),
   }) as El
-  const kids = partial.props['children'] as El[]
-  const pillEl = (Array.isArray(kids) ? kids[0] : kids) as El
-  ;(pillEl.props['onClick'] as () => void)()
+  clickPill(partial)
   const opened = render(Pill, {
     useProjection: (k: string) => (k === 'goalBudget'
       ? { budget: null, spent: { tokens: 10, costUsd: 0.5, unbilledTurns: 3 } }
