@@ -94,14 +94,17 @@ const ReactDOM = {
 // ── 原语桩：只记录被调用，返回可辨认的标记 ──
 /** 覆盖 useAnchoredPosition 的返回值；undefined 表示用默认行为。 */
 let posOverride: unknown = undefined
+/** 最近一次传给 useAnchoredPosition 的选项。 */
+let lastAnchorOptions: { side?: string; align?: string } | undefined
 const primitiveCalls: string[] = []
 const primitives = {
   Pill: (p: Record<string, unknown>) => { primitiveCalls.push('Pill'); return h('Pill', p, p['children'] as never) },
   StateDot: (p: Record<string, unknown>) => { primitiveCalls.push('StateDot'); return h('StateDot', p) },
   // ⚠️ 客户端在 factory 阶段就解构了这些函数，所以事后替换 primitives.xxx 无效 ——
   //    要控制返回值只能用下面这个开关。
-  useAnchoredPosition: (o: { open: boolean }) => {
+  useAnchoredPosition: (o: { open: boolean; side?: string; align?: string }) => {
     primitiveCalls.push('useAnchoredPosition')
+    lastAnchorOptions = o
     if (posOverride !== undefined) return posOverride
     return o.open ? { left: 10, top: 20 } : null
   },
@@ -119,14 +122,52 @@ const mod = (factory as NonNullable<typeof factory>)((m: string) =>
     : m === 'react-dom' ? ReactDOM
       : m === '@deepseek-ai/dsh-client-ui-primitives' ? primitives
         : undefined) as {
-  apply(ctx: { slots: { inject(n: string, cb: () => void): void; register(d: { id: string }, c: unknown): void } }): void
+  apply(ctx: {
+    effect(fn: () => void, description?: string): void
+    locale: {
+      register(ns: string, localeOrDicts: string | Record<string, Record<string, string>>, dict?: Record<string, string>): () => void
+      bind(ns: string): (key: string, params?: Record<string, unknown>) => string
+    }
+    slots: {
+      inject(n: string, cb: () => void): void
+      register(d: { id: string }, c: unknown): void
+    }
+  }): void
+}
+
+/**
+ * locale 服务桩 —— 照抄 LocaleRuntime 的行为：
+ * 字典查找按语言回退，`{name}` 插值，未命中的 key 原样显示自己。
+ */
+// 默认 en：前 9 组断言写的是英文文案。第 10 组显式切到 zh 验证中文。
+let activeLocale = 'en'
+const dicts: Record<string, Record<string, Record<string, string>>> = {}
+const localeMock = {
+  register(ns: string, localeOrDicts: string | Record<string, Record<string, string>>, dict?: Record<string, string>) {
+    dicts[ns] ??= {}
+    if (typeof localeOrDicts === 'string') {
+      dicts[ns]![localeOrDicts] = dict!
+    } else {
+      for (const [loc, d] of Object.entries(localeOrDicts)) dicts[ns]![loc] = d
+    }
+    return () => {}
+  },
+  bind(ns: string) {
+    return (key: string, params?: Record<string, unknown>) => {
+      const tpl = dicts[ns]?.[activeLocale]?.[key] ?? dicts[ns]?.['en']?.[key] ?? key
+      if (params === undefined) return tpl
+      return tpl.replace(/\{(\w+)\}/g, (m: string, n: string) => (n in params ? String(params[n]) : m))
+    }
+  },
 }
 
 const registry: Array<{ id: string; component: unknown }> = []
 mod.apply({
+  effect(fn: () => void) { fn() },
+  locale: localeMock,
   slots: {
-    inject(_n, cb) { cb() },
-    register(def, component) { registry.push({ id: def.id, component }) },
+    inject(_n: string, cb: () => void) { cb() },
+    register(def: { id: string }, component: unknown) { registry.push({ id: def.id, component }) },
   },
 })
 const entry = registry.find(r => r.id === 'goal-budget')
@@ -318,7 +359,73 @@ const view = (k: string) => (k === 'goalBudget' ? HOSTED : undefined)
   assert.match(textOf(opened), /3 turn\(s\) reported no token usage/, '❌ 应说明有多少 turn 无法归因')
 }
 
-console.log('✅ client-pill.spec.ts 全部通过（9 组断言）')
+// ── 9b. 面板位置：pill 在输入框右侧，必须 align:'end' 向左生长 ──
+// 'start' 会让面板向右铺开，看着像挂在别处而不是「点击的正上方」。
+{
+  remount()
+  render(Pill, { useProjection: view })
+  assert.equal(lastAnchorOptions?.side, 'top', '❌ 面板应在 pill 上方')
+  assert.equal(lastAnchorOptions?.align, 'end',
+    "❌ 应为 align:'end'（pill 右缘对齐、向左生长）；'start' 会向右铺开")
+}
+
+// ── 10. ★ 文案必须走 locale 字典，且中英都在 ──
+// 官方要求：「Product-authored Client UI text must enter through these typed
+// dictionaries.」硬编码英文会让中文用户看到英文。
+{
+  const ns = dicts['goalBudget']
+  assert.ok(ns, '❌ 没有注册 goalBudget 命名空间')
+  assert.ok(ns!['zh'], '❌ 缺 zh 字典 —— register 要求基线语言 zh 和 en 都在')
+  assert.ok(ns!['en'], '❌ 缺 en 字典')
+  assert.deepEqual(
+    Object.keys(ns!['zh']!).sort(), Object.keys(ns!['en']!).sort(),
+    '❌ 中英字典的键不一致（漏翻的键会回退显示 key 本身）',
+  )
+
+  /**
+   * 取「打开后的面板」文本。
+   *
+   * ⚠️ 不能拿整棵树：pill 的 title 也走 t，即使面板里的标签被硬编码成英文，
+   * 整棵树里仍有中文，断言会假过（第一版就漏网了）。
+   */
+  function panelText(locale: string): string {
+    activeLocale = locale
+    remount()
+    const first = render(Pill, { useProjection: view }) as El
+    clickPill(first)
+    const opened = render(Pill, { useProjection: view }) as El
+    const panel = findEl(opened, n => n.props['role'] === 'dialog')
+    assert.ok(panel, '❌ 找不到面板')
+    return textOf(panel)
+  }
+
+  const zh = panelText('zh')
+  assert.match(zh, /目标预算/, `❌ 中文下面板标题应为中文，实际：${zh}`)
+  assert.match(zh, /已花费/, `❌ 中文下应有「已花费」，实际：${zh}`)
+  assert.doesNotMatch(zh, /Goal budget|Spent|Tokens/, `❌ 中文下面板不应出现英文标签：${zh}`)
+
+  const en = panelText('en')
+  assert.match(en, /Goal budget/, `❌ 英文下面板标题应为英文，实际：${en}`)
+  assert.doesNotMatch(en, /目标预算|已花费/, `❌ 英文下面板不应出现中文：${en}`)
+  activeLocale = 'en'
+}
+
+// ── 11. 插值：{cost} / {limit} 要被替换掉 ──
+{
+  remount()
+  activeLocale = 'en'
+  const out = render(Pill, {
+    useProjection: (k: string) => (k === 'goalBudget'
+      ? { budget: { tokens: 0, costUsd: 5 }, spent: { tokens: 100, costUsd: 2.5, unbilledTurns: 0 } }
+      : undefined),
+  }) as El
+  const pillText = textOf(out)
+  assert.doesNotMatch(pillText, /\{cost\}|\{limit\}|\{percent\}/, `❌ 占位符没被替换：${pillText}`)
+  assert.match(pillText, /\$5/, `❌ 插值后应含上限值：${pillText}`)
+  activeLocale = 'zh'
+}
+
+console.log('✅ client-pill.spec.ts 全部通过（12 组断言）')
 console.log('   - 显示宿主给的数，不自己重算')
 console.log('   - 用宿主的 Pill 原语，带 onClick / aria-haspopup / aria-expanded')
 console.log('   - 点击后出现 role=dialog 明细面板')
@@ -329,3 +436,6 @@ console.log('   - 全零 / 缺失 / 无 useProjection 都不渲染且不崩')
 console.log('   - StateDot 状态随用量变（done / warning / error）')
 console.log('   - 进度条底槽不用外层 opacity')
 console.log('   - 无法归因的 turn 会在面板说明')
+console.log('   - 面板 side:top + align:end，贴着 pill 向左生长')
+console.log('   - 文案走 locale 字典，中英键一致，中文下显示中文')
+console.log('   - {cost} / {limit} / {percent} 占位符真的被替换')

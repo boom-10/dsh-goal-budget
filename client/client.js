@@ -33,6 +33,51 @@ window.__ModuleLoader__.load({
     const { Pill, StateDot, useAnchoredPosition, useDismissOnOutsidePointer } = P
     const { createPortal } = ReactDOM
 
+    /**
+     * 文案命名空间与字典。
+     *
+     * `ctx.locale.register(ns, { zh, en })` 要求**基线语言 zh 和 en 都在**
+     * （见 packages/client/locale/src/client/index.ts 的 register 重载与
+     * 其双语平衡校验）。占位符是 `{name}`，缺失的 key 会回退显示 key 本身。
+     *
+     * 官方对这条是硬要求：
+     * 「Product-authored Client UI text must enter through these typed
+     *   dictionaries or an already-localized primitive prop.」
+     */
+    const NS = 'goalBudget'
+    const DICT = {
+      zh: {
+        title: '目标预算',
+        spent: '已花费',
+        tokens: 'Token',
+        budget: '上限',
+        binding: '先到',
+        bindingCost: '费用',
+        bindingTokens: 'Token',
+        noCap: '未设会话上限',
+        noCapHint: '用 /budget $5 或 /budget 500k 设置',
+        unbilled: '{count} 轮未上报 token 用量，未计入',
+        provenance: '由宿主计价，与预算判定同一套算法',
+        summaryNone: '本会话已花费 {cost}，未设上限',
+        summaryCapped: '本会话已花费 {cost}，上限 {limit}，已用 {percent}%',
+      },
+      en: {
+        title: 'Goal budget',
+        spent: 'Spent',
+        tokens: 'Tokens',
+        budget: 'Budget',
+        binding: 'Binding',
+        bindingCost: 'cost',
+        bindingTokens: 'tokens',
+        noCap: 'No session cap',
+        noCapHint: 'Set one with /budget $5 or /budget 500k',
+        unbilled: '{count} turn(s) reported no token usage and are not counted',
+        provenance: 'Priced by the host with the same math the budget gate uses',
+        summaryNone: 'Session spend {cost}, no cap set',
+        summaryCapped: 'Session spend {cost} of {limit} budget, {percent}% used',
+      },
+    }
+
     /** 未定位的 portal 面板：隐藏但参与布局，供钩子测量真实尺寸。 */
     const MEASURE_STYLE = { visibility: 'hidden', left: 0, top: 0 }
 
@@ -45,8 +90,8 @@ window.__ModuleLoader__.load({
       zIndex: 1100,
       boxSizing: 'border-box',
       width: 'max-content',
-      minWidth: 'min(240px, calc(100vw - 24px), var(--dsh-anchored-max-width, 100vw))',
-      maxWidth: 'min(340px, calc(100vw - 24px), var(--dsh-anchored-max-width, 100vw))',
+      minWidth: 'min(210px, calc(100vw - 24px), var(--dsh-anchored-max-width, 100vw))',
+      maxWidth: 'min(320px, calc(100vw - 24px), var(--dsh-anchored-max-width, 100vw))',
       maxHeight: 'var(--dsh-anchored-max-height, none)',
       overflowX: 'hidden',
       overflowY: 'auto',
@@ -104,7 +149,7 @@ window.__ModuleLoader__.load({
     }
 
     function GoalBudgetPill(props) {
-      const { useProjection } = props
+      const { useProjection, t } = props
       const [open, setOpen] = React.useState(false)
       const rootRef = React.useRef(null)
       const panelRef = React.useRef(null)
@@ -119,7 +164,9 @@ window.__ModuleLoader__.load({
         anchorRef: rootRef,
         panelRef,
         side: 'top',
-        align: 'start',
+        // 'end'：面板右缘贴住 pill 右缘，向左生长。
+        // pill 在输入框右侧，'start' 会让面板向右铺开、看着像挂在别处。
+        align: 'end',
         gap: 8,
         margin: 8,
       })
@@ -152,8 +199,8 @@ window.__ModuleLoader__.load({
       const dotState = over ? 'error' : near ? 'warning' : 'done'
 
       const summary = ratio === null
-        ? `Session spend ${usd(spent.costUsd)}, no cap set`
-        : `Session spend ${usd(spent.costUsd)} of ${limitText} budget, ${Math.round(ratio * 100)} percent used`
+        ? t('summaryNone', { cost: usd(spent.costUsd) })
+        : t('summaryCapped', { cost: usd(spent.costUsd), limit: limitText, percent: Math.round(ratio * 100) })
 
       const pct = ratio === null ? null : Math.round(ratio * 100)
 
@@ -166,22 +213,22 @@ window.__ModuleLoader__.load({
               style: pos === null ? Object.assign({}, PANEL, MEASURE_STYLE) : Object.assign({}, PANEL, pos),
             },
               h('div', { style: TITLE },
-                h('span', null, 'Goal budget'),
+                h('span', null, t('title')),
                 pct === null ? null : h('span', { style: NUM }, pct + '%')),
               h('div', { style: RULE }),
-              row('Spent', usd(spent.costUsd)),
-              row('Tokens', num(spent.tokens)),
+              row(t('spent'), usd(spent.costUsd)),
+              row(t('tokens'), num(spent.tokens)),
               budget === null || budget === undefined
-                ? h('div', { style: NOTE }, 'No session cap. Run /budget $5 or /budget 500k to set one.')
+                ? h('div', { style: Object.assign({}, NOTE, { marginTop: '2px' }) },
+                    h('div', null, t('noCap')),
+                    h('div', { style: { opacity: 0.8 } }, t('noCapHint')))
                 : h('div', null,
-                    row('Budget', limitText),
-                    row('Binding', binding === 'cost' ? 'cost' : 'tokens')),
+                    row(t('budget'), limitText),
+                    row(t('binding'), t(binding === 'cost' ? 'bindingCost' : 'bindingTokens'))),
               spent.unbilledTurns > 0
-                ? h('div', { style: NOTE },
-                    spent.unbilledTurns + ' turn(s) reported no token usage and are not counted.')
+                ? h('div', { style: NOTE }, t('unbilled', { count: spent.unbilledTurns }))
                 : null,
-              h('div', { style: NOTE },
-                'Priced by the host with the same math the budget gate uses.'),
+              h('div', { style: NOTE }, t('provenance')),
             ),
             document.body,
           )
@@ -206,15 +253,29 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots'],
+      inject: ['slots', 'locale'],
       apply(ctx) {
+        // ctx.effect 让字典随插件卸载一起撤掉。缺了它就直接注册，
+        // 不让「拿不到 effect」变成加载期异常（那会让整个 fiber 失败）。
+        if (typeof ctx.effect === 'function') {
+          ctx.effect(() => ctx.locale.register(NS, DICT), 'goal-budget: dictionaries')
+        } else {
+          ctx.locale.register(NS, DICT)
+        }
+
+        // bind 返回的函数每个命名空间只有一份、身份稳定，所以可以安全地随
+        // 闭包传进组件，不会破坏 memo。
+        const t = ctx.locale.bind(NS)
+        // 只创建一次：每次 apply 都新建组件会打断 React 的协调。
+        const Pill = (props) => GoalBudgetPill(Object.assign({}, props, { t }))
+
         ctx.slots.inject('conversation.composer.dock', () =>
           ctx.slots.register({
             name: 'conversation.composer.dock',
             id: 'goal-budget',
             order: 10,
             inject: () => ({}),
-          }, GoalBudgetPill),
+          }, Pill),
         )
       },
     }
