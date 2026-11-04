@@ -1,0 +1,17 @@
+# 把本插件插进宿主的 loader 配置。
+#
+# `config` 在 boot 时传给 apply()，由 schemastery 校验（见 src/index.ts 的 Config）。
+# 这里只放【默认值】，真实配置写在你 profile 的 cordis.patch.yml 里覆盖。
+- insert:
+    - id: dsh-goal-budget
+      name: dsh-goal-budget
+      config:
+        budget:
+          tokens: 0            # 0 = 不限制
+          costUsd: 0
+        pricing:
+          inputPerMillion: 0.15
+          outputPerMillion: 0.60
+          cacheReadPerMillion: 0.003   # ★ 比未命中便宜 50 倍，必须区分
+        onExceed: block
+        warnAtRatio: 0.8

@@ -1,0 +1,57 @@
+{
+  "name": "dsh-goal-budget",
+  "version": "0.1.0",
+  "description": "Resource budget for DeepSeek Harness goals: attribute token spend to the current goal and block it when a configured budget is exhausted.",
+  "type": "module",
+  "license": "MIT",
+  "main": "lib/index.js",
+  "files": [
+    "src",
+    "lib",
+    "types",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "deepseek",
+    "goal",
+    "budget",
+    "cost",
+    "quota",
+    "guard"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=node --outfile=lib/index.js --external:@deepseek-ai/*",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --experimental-strip-types test/loader.spec.ts",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/boom-10/dsh-goal-budget.git"
+  },
+  "homepage": "https://github.com/boom-10/dsh-goal-budget#readme",
+  "bugs": {
+    "url": "https://github.com/boom-10/dsh-goal-budget/issues"
+  },
+  "author": "Jiangdong Chen"
+}
