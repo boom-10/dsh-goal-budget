@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Goal budget",
+    "description": "Shows the estimated spend for this session beside the composer, and blocks a long-running goal when its token or cost budget runs out."
+  }
+}

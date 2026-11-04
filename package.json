@@ -1,13 +1,15 @@
 {
   "name": "dsh-goal-budget",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Resource budget for DeepSeek Harness goals: attribute token spend to the current goal and block it when a configured budget is exhausted.",
   "type": "module",
   "license": "MIT",
   "main": "lib/index.js",
   "files": [
-    "src",
     "lib",
+    "client",
+    "locale",
+    "src",
     "types",
     "cordis.patch.yml",
     "README.md"
@@ -26,6 +28,13 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
     }
   },
   "peerDependencies": {
@@ -37,7 +46,9 @@
   },
   "exports": {
     ".": "./lib/index.js",
-    "./package.json": "./package.json"
+    "./client": "./client/client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "scripts": {
     "build": "esbuild src/index.ts --bundle --format=esm --platform=node --outfile=lib/index.js --external:@deepseek-ai/*",
