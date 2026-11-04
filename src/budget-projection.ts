@@ -23,10 +23,14 @@ export interface GoalBudgetView {
   readonly costUsd: number
 }
 
-const viewSchema = z.object({
+// wire 视图的校验。注意必须 `.nullable()`：没设过 /budget 时 fold 出的状态是 null，
+// view 会原样返回它，DSH 读历史时会对它 parse。非空 schema 会让每个没设预算的会话
+// 历史加载失败（0.4.0 的事故）。
+const viewObjectSchema = z.object({
   tokens: z.number().int().nonnegative(),
   costUsd: z.number().nonnegative(),
 }).strict()
+const viewSchema = z.nullable(viewObjectSchema)
 
 /** fold 的状态就是客户端能读的值，没有额外内部状态。 */
 type State = GoalBudgetView | null
@@ -36,7 +40,7 @@ export const goalBudgetProjectionDefinition = {
   key: 'goalBudget',
   // 框架只要求「有个能校验持久化状态的 schema」。
   // union 的推断类型这里不重要，因为 apply() 的签名已经钉死了 State。
-  stateSchema: z.union([viewSchema, z.null()]),
+  stateSchema: viewSchema,
 
   init(): State {
     return null

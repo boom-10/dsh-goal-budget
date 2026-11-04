@@ -173,32 +173,6 @@ declare module '@deepseek-ai/dsh-commands' {
 }
 
 // ─────────────────────────────────────────────────────────────
-// zod —— 只声明本插件用到的构造子
-// 出处：官方包用 `import { z } from 'zod'`（token-meter / goal 等）
-// ─────────────────────────────────────────────────────────────
-declare module 'zod' {
-  interface ZodType<T> {
-    readonly __t?: T
-  }
-  interface ZodNumber extends ZodType<number> {
-    int(): ZodNumber
-    nonnegative(): ZodNumber
-  }
-  interface ZodObject<T> extends ZodType<T> {
-    strict(): ZodObject<T>
-  }
-  interface Zod {
-    number(): ZodNumber
-    string(): ZodType<string>
-    object<T extends Record<string, unknown>>(shape: T): ZodObject<T>
-    union<T extends readonly unknown[]>(variants: T): ZodType<T[number]>
-    null(): ZodType<null>
-  }
-  export const z: Zod
-  export type ZodType<T> = import('zod').ZodType<T>
-}
-
-// ─────────────────────────────────────────────────────────────
 // @deepseek-ai/dsh-session-projection —— 只用到 types 子路径
 // 出处：packages/session/session-projection/src/index.ts:83
 // ─────────────────────────────────────────────────────────────
