@@ -1,71 +1,110 @@
 # dsh-goal-budget
 
-**A resource budget gate for DeepSeek Harness goals.**
+> 给 DSH 的长任务目标设一个 token / 费用上限。**超了就把它停下** —— 不是只给你看个数字。
 
-When a goal's token or cost budget runs out, this plugin **blocks the goal** — it does not just show you a number.
+![点击输入框旁的 pill，展开本会话的花费明细](docs/panel.png)
+
+<p align="center"><sub>输入框右侧的 pill 显示实时花费；点开是明细，进度条到 80% 转琥珀、100% 转红。</sub></p>
+
+**其他语言 / Other languages:** [English](README.en.md)
+
+---
+
+## 一句话说清它和别的插件的区别
+
+DSH 生态里已经有 40+ 个插件能告诉你 **「我花了多少钱」**。
+这个插件回答的是 **「这个目标还该不该继续跑」** —— 并且**对答案采取行动**。
 
 ```ts
 ctx.goals.block(agent, { id, revision }, {
   code: 'budget-exceeded',
-  message: 'Goal exceeded its configured tokens budget: 5200 / 100',
+  message: '目标超出配置的 token 预算：5200 / 100',
 })
 ```
 
----
-
-## Not another cost dashboard
-
-There are already 40+ DSH plugins that report spend. Every one of them is **read-only**:
-
-| Plugin | ⭐ | What it does |
-| --- | --- | --- |
-| `@kenz1117/dsh-ui-usage-billing` | 95 | usage billing **dashboard**, sidebar cost metrics |
-| `dsh-mimo-quota` | 0 | usage and estimated-spend **views** from session event logs |
-| `dsh-credits` | 3 | **track** provider balances, plan quotas, session costs |
-| `dsh-composer-balance` | 0 | **display** account balance and estimated session cost |
-| `dsh-web-api-balance` | 1 | **shows** API balance and this conversation's spend |
-
-They answer **"how much did I spend?"**. This plugin answers **"should this keep running?"** — and acts on the answer.
-
-That difference is not cosmetic. A display can be wrong and you lose nothing. **An enforcement gate can be wrong and kill work that was about to succeed.** Different problem, different failure modes (see [Failure modes](#failure-modes)).
+**这个区别不是修辞。** 一个显示错了你只是看到个错数字；**一个执行的闸门错了，会杀掉本来就要成功的工作。** 不同的问题，不同的失败模式（见 [失败模式](#失败模式)）。
 
 ---
 
-## Why this gap, specifically
+## 为什么这个缺口是真实存在的
 
-Not a guess. The harness ships an automatic continuation driver, and its own README names three things it does *not* do:
+不是猜的。DSH 自带目标自动续跑驱动，**它自己的 README 就点名了三件它不做的事**：
 
 > **Round cap, not resource budget** — token, currency, time, and provider quota policies remain independent. Their session events are **not attributed to the goal message** or **mapped into goal blocker codes**.
 >
-> — `packages/goal/goal-round-driver/README.md`, *Known Limitations and Deferred Work*
+> — `packages/goal/goal-round-driver/README.md`，*Known Limitations and Deferred Work*
 
-That sentence names three missing pieces. This plugin fills two of them:
+这句话点了三块缺失。这个插件补了其中两块：
 
-| Named gap | Status |
+| 官方点名的缺口 | 状态 |
 | --- | --- |
-| session events **not attributed to the goal message** | ✅ done here, keyed by `goalId` + `round` |
-| not **mapped into goal blocker codes** | ✅ done here, `code: 'budget-exceeded'` |
-| wall-clock budget | ⬜ not implemented yet |
+| 会话事件**没有归因到目标消息** | ✅ 已做，按 `goalId` + `round` 归因 |
+| 没有**映射成目标的阻断码** | ✅ 已做，`code: 'budget-exceeded'` |
+| 墙钟时间预算 | ⬜ 尚未实现 |
 
-`GoalBlockReason.code` is an open `string` documented as *"chosen by the blocking policy"* — it exists so a policy plugin can name its own condition. Only two codes ship in-tree today (`model-reported`, `round-limit`). This adds `budget-exceeded`.
+`GoalBlockReason.code` 是一个开放的 `string`，官方文档说它由 *"the blocking policy"* 决定 —— **它存在就是为了让策略插件给自己的条件命名**。目前树内只随附两个码（`model-reported`、`round-limit`），这里补上第三个。
 
 ---
 
-## Set a budget
+## 安装
 
-**Per session, from the chat box** — no restart, no config file:
-
-```
-/budget            show the effective budget and what you have used
-/budget $5         cap this session at 5 USD
-/budget 500k       cap it at 500k tokens
-/budget $5 500k    cap both; whichever is reached first wins
-/budget off        drop the session override and fall back to the profile default
+```sh
+dsh plugin --profile desktop add github:boom-10/dsh-goal-budget
 ```
 
-The budget is resolved as **session override ?? profile default**, so a fixed allowance can live in config and a one-off tightening costs one line in the composer.
+装完**重启 DSH**（插件的宿主半边和客户端半边都在启动时加载）。
 
-**Or as a profile default**, for an allowance you always want:
+`dsh plugin` 会把参数转发给 profile 目录里的 `pnpm`，所以 git 引用、本地路径都能用。
+
+> **从本地路径安装时**，pnpm 会警告 `peerDependencies` 无法从目标 `node_modules` 解析。**这个警告在这里是预期的** —— `@deepseek-ai/cordis` 和 `@deepseek-ai/schemastery` 由宿主在运行时提供。介意的话用 `file:` 协议。
+
+**不配任何预算也能装** —— 插件会加载并空转，等你用 `/budget` 设一个。
+
+---
+
+## 用法
+
+### 一、在会话里设上限
+
+**在输入框直接打命令，不用改 YAML、不用重启：**
+
+```
+/budget            查看当前生效的上限和已用量
+/budget $5         本会话费用上限 5 美元
+/budget 500k       本会话 token 上限 50 万
+/budget $5 500k    两个都设，谁先到算谁
+/budget off        清掉会话覆盖，回到 profile 默认
+```
+
+预算按 **会话覆盖 ?? profile 默认** 解析 —— 所以「固定的额度」可以写在配置里，「临时收紧一次」只要在输入框打一行。
+
+### 二、在 pill 上看进度
+
+装好后，输入框右侧会出现一个 pill：
+
+```
+● $2.41  ◐ 21%        ← 点它
+```
+
+点开是明细（走宿主的原语，外观、键盘可达性、点击外部关闭都和官方 pill 一致）：
+
+```
+┌──────────────────────────────┐
+│ 目标预算                 21% │
+│ ──────────────────────────── │
+│ 已花费                 $2.41 │
+│ Token                  3.60m │
+│ 上限                     $5  │
+│ 先到                    费用 │
+│ 由宿主计价，与预算判定同一套算法 │
+└──────────────────────────────┘
+```
+
+**文案跟随 DSH 的语言设置** —— 界面是中文，pill 就是中文。
+
+### 三、或者作为 profile 默认
+
+想给所有会话一个固定额度：
 
 ```yaml
 - id: dsh-goal-budget
@@ -73,86 +112,79 @@ The budget is resolved as **session override ?? profile default**, so a fixed al
     budget:
       tokens: 2000000
       costUsd: 5.00
-    onExceed: block        # or 'warn' to only log
+    onExceed: block        # 或 'warn'，只记日志不阻断
     warnAtRatio: 0.8
-```
-
-Why both layers: a budget is a **runtime decision** — it changes per session — while plugin config is a **deployment decision** read at boot. Putting the budget only in config forces a restart to change something you decide in the moment. `/budget` writes a session-scoped override; config supplies the default.
-
-## Install
-
-```sh
-dsh plugin --profile desktop add dsh-goal-budget
-```
-
-`dsh plugin` forwards to `pnpm` inside the profile directory, so a git reference works too — useful before an npm release:
-
-```sh
-dsh plugin --profile desktop add github:boom-10/dsh-goal-budget
-```
-
-When installing from a **local path**, pnpm links the package and warns that `peerDependencies` will not resolve from the target `node_modules`. That warning is expected here: `@deepseek-ai/cordis` and `@deepseek-ai/schemastery` are provided by the host at runtime. Use the `file:` protocol if it bothers you.
-
-With no budget configured the plugin loads and idles, and `/budget` is how you set one.
-
-### Pricing
-
-Cost estimation needs unit prices. Defaults are DeepSeek's; override them if yours differ or you use a gateway:
-
-```yaml
     pricing:
       inputPerMillion: 0.15
       outputPerMillion: 0.60
-      cacheReadPerMillion: 0.003   # see "Cache pricing" below
+      cacheReadPerMillion: 0.003
 ```
+
+**为什么坚持做两层：** 预算是**运行时决策**（每个会话都可能不同），而插件配置是**部署决策**（启动时读取）。把预算只放在配置里，意味着为了改一个你当场决定的值要重启应用。
 
 ---
 
-## How it works
+## 和已有的用量插件有什么不同
 
-### Attribution
+生态里报告花费的插件已经饱和了，而且**全是只读的**：
 
-Two facts make attribution possible, and only one event carries both.
+| 插件 | ⭐ | 它做什么 |
+| --- | --- | --- |
+| `@kenz1117/dsh-ui-usage-billing` | 95 | 用量账单**看板**、侧边栏成本指标 |
+| `dsh-mimo-quota` | 0 | 从会话事件日志**查看**用量与估算花费 |
+| `dsh-credits` | 3 | **跟踪**供应商余额、套餐额度、会话成本 |
+| `dsh-composer-balance` | 0 | **显示**账户余额与本会话估算成本 |
+| `dsh-web-api-balance` | 1 | **展示** API 余额与本次对话花费 |
+
+**它们回答「我花了多少」。这个插件回答「该不该继续」——并且执行这个答案。**
+
+---
+
+## 设计
+
+### 花费怎么归因到目标
+
+有两个事实让归因成为可能，而**只有一个事件同时携带两者**：
 
 ```ts
-// packages/core/session/src/types.ts:355 — spend lands here, keyed by turn
+// packages/core/session/src/types.ts:355 —— 花费落在这里，按 turn 索引
 'assistant/message': { turn: number; step: number; usage?: TokenUsage; … }
 
-// packages/core/agent/src/runtime-types.ts:328 — the ONLY event linking a message to a turn
+// packages/core/agent/src/runtime-types.ts:328 —— 唯一把消息和 turn 连起来的事件
 'agent/inbox/claimed'(payload: { agent; message: UserMessage; turn: number }): void
 ```
 
-`user/message` carries no `turn` — its payload is just a `UserMessage`. Sequencing alone would misread every `agent.inject()` context block as a new round. `agent/inbox/claimed` is the only event that pairs a message with the turn it opens, and `message.source` identifies automatic goal rounds:
+**`user/message` 不携带 `turn`** —— 它的载荷只是一个 `UserMessage`。光靠事件顺序会把每个 `agent.inject()` 的上下文块都误读成一"轮"。`agent/inbox/claimed` 是**唯一**把消息和它所开启的 turn 配对的事件，而 `message.source` 能识别自动续跑：
 
 ```ts
-source: { kind: 'goal', goalId, revision, round }   // round > 0 means an automatic round
+source: { kind: 'goal', goalId, revision, round }   // round > 0 = 自动续跑的轮次
 ```
 
-So the chain is:
+所以链条是：
 
 ```
-agent/inbox/claimed   source.kind === 'goal'  →  remember turn → { goalId, round }
+agent/inbox/claimed   source.kind === 'goal'  →  记住 turn → { goalId, round }
         ↓
-assistant/message     { turn, usage }         →  add to that goal's that round
+assistant/message     { turn, usage }         →  累加到该目标的该轮
         ↓
-checkBudget()                                 →  over? → ctx.goals.block()
+checkBudget()                                 →  超了？→ ctx.goals.block()
 ```
 
-Attribution is **rebuilt from the session log**, never stored separately — restarting cannot double-count or reset.
+归因**完全从会话日志重建**，从不另存一份 —— 所以重启不会重复计费，也不会清零。
 
-### One number, one source
+### 一个数字，一个来源
 
-The pill does not compute cost. It reads it from the same projection the gate uses, so the number you see and the number that blocks can never disagree.
+**pill 不自己算钱。** 它读的是**闸门用的同一个投影**，所以你看到的数和阻断判定用的数**不可能分歧**。
 
-That matters more than it sounds. The correct figure is a **per-record** `max(0, inputTokens − cacheReadTokens)` summed over steps, because a single record's `inputTokens` includes its cache reads — but a session's cache-read total can dwarf its input total (one measured session: 4.87M input against 400M cache reads). Subtracting the two totals instead of per record gives `max(0, negative)` → zero, and the estimate lands 15%+ away from the real number.
+这件事比听上去重要。正确的数字是**逐条** `max(0, inputTokens − cacheReadTokens)` 再累加，因为**单条记录的 `inputTokens` 里已经包含了它的缓存命中** —— 而一个会话的缓存命中合计可能远大于它的输入合计（实测一条真实会话：输入 4.87M，缓存命中 400M）。
 
-Two earlier versions got this wrong in two different ways: one priced all input at the full rate and overstated by ~18%; the next subtracted the totals and understated. Both were caught, and both are asserted against now.
+**用合计相减而不是逐条相减，会得到 `max(0, 负数) = 0`，估算偏差 15%+。**
 
-The cost convention is also the reason the projection folds `assistant/message` usage itself rather than exposing raw totals: only the host can run the arithmetic that the gate runs.
+前两个版本各错了一次：一版把所有输入按全价计，**高估约 18%**；下一版改成合计相减，**低估**。两次都被抓出来了，现在都有断言守着。
 
-### Why `ctx.goals.block()` and not something else
+### 为什么用 `ctx.goals.block()`
 
-It is the documented policy entry point, and it disarms continuation as part of the same call:
+它是官方文档指定的策略入口，而且**在同一次调用里就解除了续跑**：
 
 ```ts
 /**
@@ -162,71 +194,95 @@ It is the documented policy entry point, and it disarms continuation as part of 
 block(agent: Agent, ref: GoalRef, reason: GoalBlockReason): GoalView
 ```
 
-### Mechanisms used
+### 用到的机制
 
-| Purpose | Mechanism | Why this one |
+| 目的 | 机制 | 为什么选它 |
 | --- | --- | --- |
-| Read spend | `session/event` → `assistant/message` | Durable fact; replays across restarts. `agent/assistant-stream` is presentation data, not a replay source. |
-| Attribute to a goal | `agent/inbox/claimed` | The only message↔turn link that exists. |
-| Enforce | `ctx.goals.block()` | Documented policy entry point; disarms in the same call. |
-| Configuration | `@deepseek-ai/schemastery` `Config` | The profile-level default; validated, not a constant. |
-| Per-session control | `ctx.commands.register()` | Budgets are runtime decisions. Same mechanism the official `/goal` command uses. |
-| Service access | `inject = ['commands', 'goals', 'sessions', 'agents']` | The first three `goals`/`sessions`/`agents` match the in-tree continuation driver. |
+| 读花费 | `session/event` → `assistant/message` | 持久事实；重启后可重放。`agent/assistant-stream` 是呈现数据，不是重放源 |
+| 归因到目标 | `agent/inbox/claimed` | 唯一存在的 消息↔turn 链接 |
+| 执行 | `ctx.goals.block()` | 官方策略入口；同一次调用里解除续跑 |
+| 配置 | `@deepseek-ai/schemastery` 的 `Config` | profile 级默认值；经过校验，不是常量 |
+| 会话内控制 | `ctx.commands.register()` | 预算是运行时决策。官方 `/goal` 命令用的同一套机制 |
+| 客户端数据 | `sessionProjections.register()` + `wire` 视图 | 从日志 fold，重启/分叉/摘录自动正确；客户端读同一个数 |
+| UI 文案 | `ctx.locale.register()` + `bind()` | 官方硬要求：客户端 UI 文案必须走字典 |
 
 ---
 
-## Rejected alternatives
+## 被否掉的方案
 
-**Using `agent/turn-stopping` to stop runaway turns.** Wrong granularity: a budget is a *goal*-level fact spanning many rounds, while `turn-stopping` is a turn-level hook with no cross-round view. Worse, blocking there leaves the goal `active`, so the continuation driver immediately opens another round — a deadlock, not a stop.
+**用 `agent/turn-stopping` 拦停失控的 turn。**
+**粒度错了**：预算是**目标级**的事实、横跨多轮，而 `turn-stopping` 是轮级钩子、没有跨轮视野。更糟的是在那里阻断会让目标保持 `active`，续跑驱动立刻又开一轮 —— **那是死锁，不是停止**。
 
-**Letting the model police itself via a tool.** The harness already notes the weakness of self-assessment (*"No independent evaluator — the model-facing goal policy decides when evidence is sufficient"*). Asking the constrained party to enforce its own constraint fails exactly when the budget is exhausted and judgment is worst — and it costs another model call *after* the budget is already gone.
+**让模型用工具自己管自己。**
+框架自己的文档就指出了自我评估的弱点（*"No independent evaluator — the model-facing goal policy decides when evidence is sufficient"*）。**让被约束方执行对自己的约束，恰好在预算耗尽、判断力最差的时候失效** —— 而且它还要在预算已经花完之后再花一次模型调用。
 
-**Building the 44th cost dashboard.** The ecosystem has that covered, and a dashboard cannot stop anything.
+**做第 44 个成本看板。**
+生态已经覆盖了，而且看板拦不住任何东西。
 
-**Putting the budget only in plugin config.** The first version did, and it was wrong: config is read at boot, so changing a budget meant editing YAML and restarting — for a value you decide per session. A per-session budget needs a per-session surface, which is why `/budget` exists and config keeps only the default.
+**把预算只放在插件配置里。**
+第一版就是这么做的，错了：配置在启动时读取，所以改预算要改 YAML + 重启 —— 而那是你当场决定的值。**会话级的预算需要会话级的界面**，这就是 `/budget` 存在的原因，配置只留默认值。
 
 ---
 
-## Failure modes
+## 失败模式
 
-Known, with current mitigation and what is still unsolved.
+已知的，连同当前的缓解手段和仍未解决的问题。
 
-| # | Fails how | Looks like | Mitigation | Still open |
+| # | 怎么坏 | 表现 | 缓解 | 仍未解决 |
 | --- | --- | --- | --- | --- |
-| 1 | A turn mixes human and goal messages | human spend billed to the goal; premature block | Strict `source.kind === 'goal'` filter | Mixed-turn spend cannot be split cleanly; a warning records when it happens |
-| 2 | Unit prices differ from defaults | cost estimate off; wrong block point | All prices are config; docs state these are estimates | Provider price changes, peak/off-peak, gateway markups are not tracked |
-| 3 | State rebuilt after restart | budget resets or doubles | Spend is recomputed from the session log only; nothing is stored separately | Session-format migrations may change field availability |
-| 4 | Adapter reports no `usage` | spend silently uncounted | Marked **unattributable** and counted, never guessed; the block message reports the count | A provider that never reports usage **cannot be constrained at all** |
-| 5 | Several goals in one session | spend billed to the wrong goal | Filtered by `goalId` | The boundary turn when goals are switched |
-| 6 | Race with the continuation driver | a round starts after the block | `block()` disarms in the same call; ledgers cleared on dispose | A round already accepted but not yet run (the unload race the driver's README documents) |
-| 7 | A ledger is registered in one structure but not the other | **attribution silently stops working** — no error | Both structures are maintained together and asserted by tests | None known |
-| 8 | Startup log invisible at INFO level | plugin looks unloaded | Startup visibility uses `console.log`; alerts use `logger.warn` | Verbosity is not yet configurable |
-| 9 | ~~`/budget` override is process-local~~ | ~~a restart returns the session to the profile default~~ | **Fixed**: the override lives in the `goalBudget` projection, folded from the `command/run` events the commands service already writes, so it is rebuilt from the log rather than remembered | — |
-| 10 | A budget is blocking a goal, then raised | spend already over the old limit, but nothing re-checks | Setting or clearing a budget clears the blocked marker so the next step re-evaluates | A goal already `blocked` stays blocked until the operator resumes it |
+| 1 | 一轮里混有人类消息和目标消息 | 人类的消费被记到目标上；过早阻断 | 严格过滤 `source.kind === 'goal'` | 混合轮的花费无法干净拆分；发生时记一条警告 |
+| 2 | 单价与默认值不同 | 成本估算偏移；阻断点错误 | 所有单价都可配；文档说明这是估算 | 供应商调价、峰谷价、网关加价都不跟踪 |
+| 3 | 重启后重建状态 | 预算重置或翻倍 | 花费只从会话日志重算，不另存 | 会话格式迁移可能改变字段可用性 |
+| 4 | 适配器不上报 `usage` | 花费**静默**未计入 | 标记为**不可归因**并计数，**从不猜**；阻断信息里报告条数 | **完全不上报 usage 的供应商根本无法约束** |
+| 5 | 一个会话里有多个目标 | 花费记到错的目标上 | 按 `goalId` 过滤 | 切换目标时的边界轮次 |
+| 6 | 与续跑驱动竞争 | 阻断之后还是开了一轮 | `block()` 在同一次调用里解除续跑；dispose 时清账本 | 已被接受但尚未执行的轮次（驱动 README 里记录的卸载竞争） |
+| 7 | 账本注册在一个结构里但没注册在另一个 | **归因静默失效** —— 不报错 | 两个结构一起维护，并有测试断言 | 未知 |
+| 8 | INFO 级别下启动日志不可见 | 插件看起来没加载 | 启动可见性用 `console.log`；告警用 `logger.warn` | 详细程度尚不可配 |
+| 9 | ~~`/budget` 覆盖是进程内的~~ | ~~重启后回到 profile 默认~~ | **已修**：覆盖活在 `goalBudget` 投影里，从命令服务本来就会写的 `command/run` 事件 fold 出来 —— 是重建的，不是记住的 | — |
+| 10 | 目标已被阻断，然后调高预算 | 花费仍超旧限额，但没人重新检查 | 设置或清除预算时会清掉阻断标记，下一步重新判定 | 已经 `blocked` 的目标需要操作者手动恢复 |
+| 11 | 客户端与宿主各算一套成本 | 看到的数和阻断的数不一致 | 花费由宿主算好放进投影，**客户端只显示** | 客户端读不到 profile 默认值，所以只有设了会话上限才显示分母 |
 
-Number 7 is the one to watch: it fails *silently*. So does number 8. Both were found by testing behaviour rather than checking for absence of errors — the same shape as the harness's own post-mortem 0001, where 178 green tests and 100% line coverage coexisted with a completely non-functional feature.
+**第 7 条是要盯着的那条：它失败时*没有声音*。第 8 条也是。**
 
-### Cache pricing
+两条都是靠**测行为**而不是**检查有没有报错**发现的 —— 和框架自己的 post-mortem 0001 同一个形状：那里 178 个绿灯测试和 100% 行覆盖，与一个完全不能用的功能同时存在。
 
-At a 90% cache-hit ratio, ignoring `cacheReadTokens` overstates cost by **2.7×** on a measured scenario (1000 input / 900 cached / 100 output). The error is not a fixed multiple — it grows with the hit ratio, and the unit price gap is ~50×. So `cacheReadTokens` is priced separately and subtracted from `inputTokens` to avoid double-billing.
+### 缓存计价
+
+在 90% 缓存命中率下，忽略 `cacheReadTokens` 会把成本**高估 2.7 倍**（实测场景：1000 输入 / 900 命中 / 100 输出）。
+
+这个误差**不是固定倍数** —— 它随命中率增长，而单价差约 50 倍。所以 `cacheReadTokens` 单独计价，并从 `inputTokens` 里扣掉以避免重复计费。
 
 ---
 
-## Development
+## 开发
 
 ```sh
 npm run typecheck   # tsc
-npm test            # five specs; no API key needed
-npm run build       # esbuild bundle → lib/index.js
+npm test            # 5 个 spec，不需要 API key
+npm run build       # esbuild 打包 → lib/index.js
 ```
 
-The suite is checked by mutation, not just by passing: reintroducing either pricing bug, or dropping the `nullable()` a wire view needs, turns it red. Two of those mutations originally survived — the tests had never exercised a `k` suffix or a non-zero `cacheReadTokens` — which is how `accounting.spec.ts` and the suffix cases in `budget-command.spec.ts` came to exist.
+**测试套件是用变异检验的，不只是"跑绿"。** 把任何一个计价 bug 放回去、或者去掉 wire 视图需要的 `nullable()`，套件都会变红。
 
-Two suites: `test/loader.spec.ts` asserts the export shape through the real `unwrapExports` semantics, and `test/budget-command.spec.ts` drives the `/budget` handler and asserts that a session override actually changes the blocking threshold, that clearing it stops blocking, and that one goal is never blocked twice.
+其中两个变异**最初是漏网的** —— 测试从没喂过 `k` 后缀，也从没喂过非零的 `cacheReadTokens`。`test/accounting.spec.ts` 和 `budget-command.spec.ts` 里的后缀用例就是这么来的。
 
-Types for the harness APIs this plugin uses live in [`types/dsh-ambient.d.ts`](types/dsh-ambient.d.ts), each annotated with its source file and line. That file doubles as the dependency manifest — it is the complete list of harness surface this plugin touches, and it costs no install.
+5 个 spec 各管一件事：
 
-`test/loader.spec.ts` drives the real `unwrapExports` semantics rather than mounting the plugin by hand, because a hand-mounted test cannot validate how a plugin loads. It asserts that no `export default` is present: a default export makes the loader resolve to a bare `apply` function, discarding the sibling `inject`/`name`/`Config` exports, so the fiber is built with an empty `inject` and the plugin crashes on first service access.
+| Spec | 管什么 |
+| --- | --- |
+| `loader.spec.ts` | 导出形状（走真实的 `unwrapExports` 语义）|
+| `budget-command.spec.ts` | `/budget` 处理器；**会话覆盖真的改变了阻断阈值**；清除后不再误触发；一个目标不会被阻断两次 |
+| `accounting.spec.ts` | 计价与判定；缓存从输入扣掉且不会变负；「谁先到算谁」两个方向 |
+| `projection-view.spec.ts` | 投影的 `wire` 视图能通过它自己的 `viewSchema`（**0.4.0 的事故**：非空 schema 让每个没设预算的会话历史加载失败）|
+| `client-pill.spec.ts` | 浏览器半边：读对层级、走 portal、点得开、文案走字典 |
+
+### 两件值得单独说的事
+
+**`loader.spec.ts` 驱动真实的加载路径，而不是手工挂载插件。** 因为手工挂载**验证不了插件怎么加载**。它断言没有 `export default` —— 一个 default 导出会让 loader 解析成一个裸的 `apply` 函数，丢掉旁边的 `inject`/`name`/`Config`，于是 fiber 用空的 `inject` 构建，插件在第一次访问服务时崩溃。
+
+**类型声明即依赖清单。** 这个插件用到的 DSH API 类型都在 [`types/dsh-ambient.d.ts`](types/dsh-ambient.d.ts)，**每一条都标了出处文件和行号**。那个文件同时就是完整的依赖面清单，而且零安装成本。
+
+---
 
 ## License
 
