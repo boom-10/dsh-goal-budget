@@ -68,9 +68,9 @@ window.__ModuleLoader__.load({
       const usage = useProjection('tokenUsage')
       if (usage === undefined || usage === null) return null
 
-      const t = usage.totals
-      if (t === undefined) return null
-
+      // tokenUsage 的 wire 视图就是 totals 本身（扁平），没有 `totals` 这一层。
+      // 0.4.0/0.4.1 误读 usage.totals → 恒为 undefined → pill 从不渲染。
+      const t = usage
       const total = t.uncachedInputTokens + t.outputTokens + t.cacheReadTokens + t.cacheWriteTokens
       // 全零时不占位（和宿主 UsagePill 的处理一致）
       if (total === 0) return null
