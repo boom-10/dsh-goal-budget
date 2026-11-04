@@ -17,7 +17,15 @@ type AnyHandler = (...a: unknown[]) => void
 const handlers = new Map<string, AnyHandler[]>()
 const warns: string[] = []
 
+const registeredProjections: Array<{ key: string }> = []
 const ctx = {
+  // 投影注册在真实宿主里是异步的；这里同步返回一个假 handle，够验证注册发生过。
+  sessionProjections: {
+    register(definition: { key: string }) {
+      registeredProjections.push(definition)
+      return Promise.resolve({ stateOf: () => null })
+    },
+  },
   commands: {
     register(def: { name: string; handler: (inv: unknown) => never }) {
       commands[def.name] = def.handler as never
@@ -97,9 +105,14 @@ const bad = commands['budget']!({ agent, rawInput: 'abc' })
 assert.equal(bad.kind, 'error')
 assert.ok(bad.text!.length > 0)
 
-console.log('✅ budget-command.spec.ts 全部通过（9 项）')
+// ── 10. 投影真的注册了（客户端靠它读预算）──
+assert.equal(registeredProjections.length, 1, '❌ goalBudget 投影没注册')
+assert.equal(registeredProjections[0]!.key, 'goalBudget', '❌ 投影 key 不对')
+
+console.log('✅ budget-command.spec.ts 全部通过（10 项）')
 console.log('   - profile 默认 + 会话覆盖 两级解析')
 console.log('   - 覆盖真的改变阻断阈值')
 console.log('   - 清除后不再误杀')
 console.log('   - 同 goal 不重复阻断')
 console.log('   - 非法输入报错不崩')
+console.log('   - goalBudget 投影已注册')

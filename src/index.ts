@@ -21,11 +21,12 @@ import {
   describeBudget, formatTokens, formatUsd, isUnlimited, parseBudgetCommand,
   renderBudget, type Budget,
 } from './budget-command.ts'
+import { goalBudgetProjectionDefinition, type GoalBudgetView } from './budget-projection.ts'
 
 export const name = 'dsh-goal-budget'
 
 /** 声明进 inject 的服务 —— 缺一个都会在加载期抛「without inject」。 */
-export const inject = ['commands', 'goals', 'sessions', 'agents'] as const
+export const inject = ['commands', 'goals', 'sessions', 'sessionProjections', 'agents'] as const
 
 export const Config = z.object({
   budget: z
@@ -79,6 +80,10 @@ type Ctx = {
       input?: { hint: string }
       handler: (invocation: BudgetInvocation) => { kind: 'success'; text?: string } | { kind: 'error'; text: string }
     }): () => void
+  }
+  /** 出处：packages/session/session-projection/src/index.ts（register 返回 disposer） */
+  sessionProjections: {
+    register(definition: unknown): Promise<{ readonly dispose?: () => void }>
   }
   on: (event: string, listener: (...args: never[]) => void) => void
   logger: { warn: (msg: string) => void; info: (msg: string) => void }
@@ -147,7 +152,27 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
     tokens: config.budget?.tokens ?? 0,
     costUsd: config.budget?.costUsd ?? 0,
   }
+
+  /**
+   * 会话覆盖的**进程内快路径**。
+   *
+   * 权威来源是 `goalBudget` 投影（fold 会话日志里的 `command/run`），
+   * 它负责重启后重建和给客户端读。这里这份是同一份事实的缓存：
+   * 两者都由 `/budget` 的 handler 在同一个动作里写入，**不会分歧**。
+   * 用它是因为主机端判定路径上不想为了读一个值去取 session 对象。
+   */
   const sessionOverrides = new WeakMap<object, Budget>()
+
+  /**
+   * 把覆盖登记成投影 —— 客户端 `useProjection('goalBudget')` 读的就是它。
+   * 顺带让「重启后预算还在」成立：日志里有 `/budget` 事件，状态就能重建。
+   */
+  const projectionHandle = ctx.sessionProjections.register(goalBudgetProjectionDefinition)
+  // register 可能是异步的；失败不能拖垮插件加载（postmortem 0001 的教训：
+  // 加载期的异常会让整个 fiber 失败）。
+  void Promise.resolve(projectionHandle).catch((error: unknown) => {
+    ctx.logger.warn(`[goal-budget] goalBudget 投影注册失败，客户端将读不到预算：${String(error)}`)
+  })
 
   /** 解析某会话当前生效的预算，并说明它从哪来。 */
   const resolveBudget = (agent: object): { budget: Budget; source: 'session' | 'profile' } => {
