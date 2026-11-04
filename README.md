@@ -140,6 +140,16 @@ checkBudget()                                 →  over? → ctx.goals.block()
 
 Attribution is **rebuilt from the session log**, never stored separately — restarting cannot double-count or reset.
 
+### One number, one source
+
+The pill does not compute cost. It reads it from the same projection the gate uses, so the number you see and the number that blocks can never disagree.
+
+That matters more than it sounds. The correct figure is a **per-record** `max(0, inputTokens − cacheReadTokens)` summed over steps, because a single record's `inputTokens` includes its cache reads — but a session's cache-read total can dwarf its input total (one measured session: 4.87M input against 400M cache reads). Subtracting the two totals instead of per record gives `max(0, negative)` → zero, and the estimate lands 15%+ away from the real number.
+
+Two earlier versions got this wrong in two different ways: one priced all input at the full rate and overstated by ~18%; the next subtracted the totals and understated. Both were caught, and both are asserted against now.
+
+The cost convention is also the reason the projection folds `assistant/message` usage itself rather than exposing raw totals: only the host can run the arithmetic that the gate runs.
+
 ### Why `ctx.goals.block()` and not something else
 
 It is the documented policy entry point, and it disarms continuation as part of the same call:
@@ -191,7 +201,7 @@ Known, with current mitigation and what is still unsolved.
 | 6 | Race with the continuation driver | a round starts after the block | `block()` disarms in the same call; ledgers cleared on dispose | A round already accepted but not yet run (the unload race the driver's README documents) |
 | 7 | A ledger is registered in one structure but not the other | **attribution silently stops working** — no error | Both structures are maintained together and asserted by tests | None known |
 | 8 | Startup log invisible at INFO level | plugin looks unloaded | Startup visibility uses `console.log`; alerts use `logger.warn` | Verbosity is not yet configurable |
-| 9 | `/budget` override is process-local | a restart returns the session to the profile default | The command's own input is recorded in the session log, so an operator can see what was set | Overrides do not survive a restart; re-issue the command |
+| 9 | ~~`/budget` override is process-local~~ | ~~a restart returns the session to the profile default~~ | **Fixed**: the override lives in the `goalBudget` projection, folded from the `command/run` events the commands service already writes, so it is rebuilt from the log rather than remembered | — |
 | 10 | A budget is blocking a goal, then raised | spend already over the old limit, but nothing re-checks | Setting or clearing a budget clears the blocked marker so the next step re-evaluates | A goal already `blocked` stays blocked until the operator resumes it |
 
 Number 7 is the one to watch: it fails *silently*. So does number 8. Both were found by testing behaviour rather than checking for absence of errors — the same shape as the harness's own post-mortem 0001, where 178 green tests and 100% line coverage coexisted with a completely non-functional feature.
@@ -206,9 +216,11 @@ At a 90% cache-hit ratio, ignoring `cacheReadTokens` overstates cost by **2.7×*
 
 ```sh
 npm run typecheck   # tsc
-npm test            # both specs; no API key needed
+npm test            # five specs; no API key needed
 npm run build       # esbuild bundle → lib/index.js
 ```
+
+The suite is checked by mutation, not just by passing: reintroducing either pricing bug, or dropping the `nullable()` a wire view needs, turns it red. Two of those mutations originally survived — the tests had never exercised a `k` suffix or a non-zero `cacheReadTokens` — which is how `accounting.spec.ts` and the suffix cases in `budget-command.spec.ts` came to exist.
 
 Two suites: `test/loader.spec.ts` asserts the export shape through the real `unwrapExports` semantics, and `test/budget-command.spec.ts` drives the `/budget` handler and asserts that a session override actually changes the blocking threshold, that clearing it stops blocking, and that one goal is never blocked twice.
 

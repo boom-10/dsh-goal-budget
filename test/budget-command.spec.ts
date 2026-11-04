@@ -105,14 +105,38 @@ const bad = commands['budget']!({ agent, rawInput: 'abc' })
 assert.equal(bad.kind, 'error')
 assert.ok(bad.text!.length > 0)
 
-// ── 10. 投影真的注册了（客户端靠它读预算）──
+// ── 10. ★ token 后缀 k / m 必须真的乘上去 ──
+// 变异测试发现：原来只测过 `$0.01`，把 k 的乘数改成 1 一条都不红。
+{
+  const { parseBudgetCommand } = await import('../src/budget-command.ts')
+
+  const k = parseBudgetCommand('500k')
+  assert.equal(k.kind, 'set')
+  if (k.kind === 'set') assert.equal(k.budget.tokens, 500_000, '❌ 500k 应为 500000')
+
+  const m = parseBudgetCommand('1.5m')
+  assert.equal(m.kind, 'set')
+  if (m.kind === 'set') assert.equal(m.budget.tokens, 1_500_000, '❌ 1.5m 应为 1500000')
+
+  const plain = parseBudgetCommand('500000')
+  assert.equal(plain.kind, 'set')
+  if (plain.kind === 'set') assert.equal(plain.budget.tokens, 500_000, '❌ 裸数字不应被乘')
+
+  // 后缀大小写不敏感
+  const upper = parseBudgetCommand('2K')
+  assert.equal(upper.kind, 'set')
+  if (upper.kind === 'set') assert.equal(upper.budget.tokens, 2_000, '❌ 2K 应为 2000')
+}
+
+// ── 11. 投影真的注册了（客户端靠它读预算）──
 assert.equal(registeredProjections.length, 1, '❌ goalBudget 投影没注册')
 assert.equal(registeredProjections[0]!.key, 'goalBudget', '❌ 投影 key 不对')
 
-console.log('✅ budget-command.spec.ts 全部通过（10 项）')
+console.log('✅ budget-command.spec.ts 全部通过（11 项）')
 console.log('   - profile 默认 + 会话覆盖 两级解析')
 console.log('   - 覆盖真的改变阻断阈值')
 console.log('   - 清除后不再误杀')
 console.log('   - 同 goal 不重复阻断')
 console.log('   - 非法输入报错不崩')
+console.log('   - token 后缀 k/m 真的乘上去了')
 console.log('   - goalBudget 投影已注册')

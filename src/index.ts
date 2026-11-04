@@ -21,7 +21,7 @@ import {
   describeBudget, formatTokens, formatUsd, isUnlimited, parseBudgetCommand,
   renderBudget, type Budget,
 } from './budget-command.ts'
-import { goalBudgetProjectionDefinition, type GoalBudgetView } from './budget-projection.ts'
+import { createGoalBudgetProjection } from './budget-projection.ts'
 
 export const name = 'dsh-goal-budget'
 
@@ -163,16 +163,6 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
    */
   const sessionOverrides = new WeakMap<object, Budget>()
 
-  /**
-   * 把覆盖登记成投影 —— 客户端 `useProjection('goalBudget')` 读的就是它。
-   * 顺带让「重启后预算还在」成立：日志里有 `/budget` 事件，状态就能重建。
-   */
-  const projectionHandle = ctx.sessionProjections.register(goalBudgetProjectionDefinition)
-  // register 可能是异步的；失败不能拖垮插件加载（postmortem 0001 的教训：
-  // 加载期的异常会让整个 fiber 失败）。
-  void Promise.resolve(projectionHandle).catch((error: unknown) => {
-    ctx.logger.warn(`[goal-budget] goalBudget 投影注册失败，客户端将读不到预算：${String(error)}`)
-  })
 
   /** 解析某会话当前生效的预算，并说明它从哪来。 */
   const resolveBudget = (agent: object): { budget: Budget; source: 'session' | 'profile' } => {
@@ -188,6 +178,18 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
     cacheReadPerMillion: 0.003,
   }
   const unlimited = isUnlimited(profileBudget)
+
+  /**
+   * 把覆盖登记成投影 —— 客户端 `useProjection('goalBudget')` 读的就是它。
+   * 顺带让「重启后预算还在」成立：日志里有 `/budget` 事件，状态就能重建。
+   */
+  // 单价与宿主 Config 同源 —— 客户端显示的数就是阻断判定用的数。
+  const projectionHandle = ctx.sessionProjections.register(createGoalBudgetProjection(pricing))
+  // register 可能是异步的；失败不能拖垮插件加载（postmortem 0001 的教训：
+  // 加载期的异常会让整个 fiber 失败）。
+  void Promise.resolve(projectionHandle).catch((error: unknown) => {
+    ctx.logger.warn(`[goal-budget] goalBudget 投影注册失败，客户端将读不到预算：${String(error)}`)
+  })
 
   // 启动日志。
   //
