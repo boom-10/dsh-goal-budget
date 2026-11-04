@@ -72,12 +72,39 @@ function remount(): void {
   resetCursor()
 }
 
+// ── document 桩：portal 的目标 ──
+const BODY = { __body: true }
+;(globalThis as unknown as Record<string, unknown>)['document'] = { body: BODY }
+
+/**
+ * react-dom 桩。
+ *
+ * `createPortal(node, target)` 在真实 React 里会把 node 挂到 target 下；
+ * 这里返回 node 本身（测试就能照常遍历它），同时记录调用参数用于断言
+ * 「面板确实 portal 出去了」—— 内联渲染会被 composer 的 overflow 裁掉。
+ */
+const portalCalls: Array<{ node: unknown; target: unknown }> = []
+const ReactDOM = {
+  createPortal(node: unknown, target: unknown) {
+    portalCalls.push({ node, target })
+    return node
+  },
+}
+
 // ── 原语桩：只记录被调用，返回可辨认的标记 ──
+/** 覆盖 useAnchoredPosition 的返回值；undefined 表示用默认行为。 */
+let posOverride: unknown = undefined
 const primitiveCalls: string[] = []
 const primitives = {
   Pill: (p: Record<string, unknown>) => { primitiveCalls.push('Pill'); return h('Pill', p, p['children'] as never) },
   StateDot: (p: Record<string, unknown>) => { primitiveCalls.push('StateDot'); return h('StateDot', p) },
-  useAnchoredPosition: (o: { open: boolean }) => { primitiveCalls.push('useAnchoredPosition'); return o.open ? { left: 10, top: 20 } : null },
+  // ⚠️ 客户端在 factory 阶段就解构了这些函数，所以事后替换 primitives.xxx 无效 ——
+  //    要控制返回值只能用下面这个开关。
+  useAnchoredPosition: (o: { open: boolean }) => {
+    primitiveCalls.push('useAnchoredPosition')
+    if (posOverride !== undefined) return posOverride
+    return o.open ? { left: 10, top: 20 } : null
+  },
   useDismissOnOutsidePointer: () => { primitiveCalls.push('useDismissOnOutsidePointer') },
 }
 
@@ -88,7 +115,10 @@ new Function('window', src)(win)
 assert.ok(factory, '❌ client.js 没有调用 __ModuleLoader__.load')
 
 const mod = (factory as NonNullable<typeof factory>)((m: string) =>
-  m === 'react' ? React : m === '@deepseek-ai/dsh-client-ui-primitives' ? primitives : undefined) as {
+  m === 'react' ? React
+    : m === 'react-dom' ? ReactDOM
+      : m === '@deepseek-ai/dsh-client-ui-primitives' ? primitives
+        : undefined) as {
   apply(ctx: { slots: { inject(n: string, cb: () => void): void; register(d: { id: string }, c: unknown): void } }): void
 }
 
@@ -175,12 +205,50 @@ const view = (k: string) => (k === 'goalBudget' ? HOSTED : undefined)
   const panel = (Array.isArray(openedKids) ? openedKids : [openedKids])
     .find(c => (c as El)?.props?.['role'] === 'dialog')
   assert.ok(panel, '❌ 展开后没有出现 role="dialog" 的明细面板')
+
+  // ★ 必须 portal 到 document.body：内联渲染会被 composer 的 overflow 裁掉
+  //   （0.6.0 的事故：面板被切在屏幕右下角）。
+  //   useAnchoredPosition 的契约就是「body-portaled panels」。
+  const call = portalCalls[portalCalls.length - 1]
+  assert.ok(call, '❌ 面板没有走 createPortal —— 会被 composer 的 overflow 裁掉')
+  assert.equal(call!.target, BODY, '❌ 面板应 portal 到 document.body')
+  assert.equal(call!.node, panel, '❌ portal 的不是那个面板元素')
   const panelText = textOf(panel)
   assert.match(panelText, /Goal budget/, '❌ 面板标题缺失')
   assert.match(panelText, /Spent/, '❌ 面板应有 Spent 行')
   assert.match(panelText, /\$2\.26/, '❌ 面板应显示花费')
   assert.match(panelText, /2\.13m|2\.1m/, '❌ 面板应显示 token 数')
   assert.match(panelText, /\/budget/, '❌ 未设上限时应提示用 /budget')
+}
+
+// ── 3b. 首帧测量：pos 还是 null 时必须隐藏但参与布局 ──
+// 钩子靠首帧量真实尺寸做夹取；若首帧不渲染，面板会被摆到视口外。
+{
+  remount()
+  posOverride = null   // 模拟「钩子还没量到」的首帧
+  const out = render(Pill, { useProjection: view }) as El
+  const kids = out.props['children'] as El[]
+  ;((Array.isArray(kids) ? kids[0] : kids) as El).props['onClick']!()
+  const opened = render(Pill, { useProjection: view }) as El
+  const panel = findEl(opened, n => n.props['role'] === 'dialog')
+  assert.ok(panel, '❌ 首帧也应渲染面板（供测量）')
+  const style = panel!.props['style'] as Record<string, unknown>
+  assert.equal(style['visibility'], 'hidden', '❌ 首帧面板应隐藏但仍参与布局')
+  assert.equal(style['position'], 'fixed', '❌ 面板必须 fixed 定位（契约要求）')
+  posOverride = undefined
+}
+
+// ── 3c. 面板层级要盖过模态层（宿主规定 1100）──
+{
+  remount()
+  const first = render(Pill, { useProjection: view }) as El
+  const kids = first.props['children'] as El[]
+  ;((Array.isArray(kids) ? kids[0] : kids) as El).props['onClick']!()
+  const opened = render(Pill, { useProjection: view }) as El
+  const panel = findEl(opened, n => n.props['role'] === 'dialog')
+  assert.ok(panel, '❌ 找不到面板')
+  assert.equal((panel!.props['style'] as Record<string, unknown>)['zIndex'], 1100,
+    '❌ z-index 应为 1100（要盖在模态层 z 1000 之上）')
 }
 
 // ── 4. 全零 / 缺失 / 无 useProjection 都不渲染且不崩 ──
@@ -247,10 +315,13 @@ const view = (k: string) => (k === 'goalBudget' ? HOSTED : undefined)
   assert.match(textOf(opened), /3 turn\(s\) reported no token usage/, '❌ 应说明有多少 turn 无法归因')
 }
 
-console.log('✅ client-pill.spec.ts 全部通过（7 组断言）')
+console.log('✅ client-pill.spec.ts 全部通过（9 组断言）')
 console.log('   - 显示宿主给的数，不自己重算')
 console.log('   - 用宿主的 Pill 原语，带 onClick / aria-haspopup / aria-expanded')
 console.log('   - 点击后出现 role=dialog 明细面板')
+console.log('   - 面板 portal 到 document.body（否则被 overflow 裁掉）')
+console.log('   - 首帧按 MEASURE_STYLE 隐藏但仍参与布局')
+console.log('   - z-index 1100，盖过模态层')
 console.log('   - 全零 / 缺失 / 无 useProjection 都不渲染且不崩')
 console.log('   - StateDot 状态随用量变（done / warning / error）')
 console.log('   - 进度条底槽不用外层 opacity')

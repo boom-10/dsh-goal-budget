@@ -6,24 +6,70 @@
  *
  * ## 数字全部来自宿主
  *
- * 客户端不做计价。`goalBudget` 投影带着宿主用同一个 `costOf` 算好的 `spent`，
- * 以及预算。**一个数字只有一个来源，显示的和阻断判定用的不可能分歧。**
+ * 客户端不做计价。`goalBudget` 投影带着宿主用同一个 `costOf` 算好的 `spent`
+ * 和预算。**一个数字只有一个来源，显示的和阻断判定用的不可能分歧。**
  *
- * ## 用的宿主原语
+ * ## 面板必须 portal 到 document.body
  *
- * `@deepseek-ai/dsh-client-ui-primitives` 在 shell 的 baseline 模块表里
- * （不必写进 `dsh.client.external`），所以能直接用 `Pill` / `StateDot` /
- * `useAnchoredPosition` / `useDismissOnOutsidePointer` —— 外观、键盘可达性、
- * 定位、点击外部关闭都和宿主自己的 usage pill 一致，不用自己糊一套。
+ * `useAnchoredPosition` 的契约（见其源码首行注释）是
+ * 「**body-portaled** panels with a viewport fixed-position containing block」，
+ * 参数注释还写着「its ancestors must not establish a containing block」。
+ *
+ * 内联渲染在输入框里会被 composer 的 overflow 裁掉、定位也算错 —— 0.6.0 的
+ * 事故现场就是面板被切在屏幕右下角。宿主的 DialogPill 同样是
+ * `createPortal(..., document.body)`。
+ *
+ * 另外首帧要按 `MEASURE_STYLE`（隐藏但参与布局）渲染，否则钩子量不到真实尺寸，
+ * 夹取（clamp）就没有依据。
  */
 window.__ModuleLoader__.load({
   id: 'dsh-goal-budget',
   factory(require) {
     const React = require('react')
+    const ReactDOM = require('react-dom')
     const h = React.createElement
     const P = require('@deepseek-ai/dsh-client-ui-primitives')
 
     const { Pill, StateDot, useAnchoredPosition, useDismissOnOutsidePointer } = P
+    const { createPortal } = ReactDOM
+
+    /** 未定位的 portal 面板：隐藏但参与布局，供钩子测量真实尺寸。 */
+    const MEASURE_STYLE = { visibility: 'hidden', left: 0, top: 0 }
+
+    /**
+     * 面板皮肤 —— 与宿主 stat-dialog 同款主题变量。
+     * z-index 1100：宿主规定 portal 面板要盖在模态层（z 1000）之上。
+     */
+    const PANEL = {
+      position: 'fixed',
+      zIndex: 1100,
+      boxSizing: 'border-box',
+      width: 'max-content',
+      minWidth: 'min(240px, calc(100vw - 24px), var(--dsh-anchored-max-width, 100vw))',
+      maxWidth: 'min(340px, calc(100vw - 24px), var(--dsh-anchored-max-width, 100vw))',
+      maxHeight: 'var(--dsh-anchored-max-height, none)',
+      overflowX: 'hidden',
+      overflowY: 'auto',
+      padding: '16px',
+      border: 0,
+      borderRadius: 'var(--dsw-radius-lg, 12px)',
+      background: 'var(--dsw-specific-menu, #212124)',
+      backdropFilter: 'var(--dsw-menu-backdrop-filter, none)',
+      boxShadow: 'var(--dsw-elevation-prominent, 0 8px 28px rgba(0,0,0,.32))',
+      fontSize: '12px',
+      lineHeight: '18px',
+      color: 'var(--dsw-alias-label-secondary, inherit)',
+      cursor: 'default',
+    }
+    const TITLE = {
+      display: 'flex', justifyContent: 'space-between', gap: '16px',
+      marginBottom: '8px', color: 'var(--dsw-alias-label-primary, inherit)', fontWeight: 500,
+    }
+    const RULE = { marginBottom: '10px', borderTop: '0.5px solid var(--dsw-alias-border-l2, rgba(128,128,128,.3))' }
+    const ROW = { display: 'flex', justifyContent: 'space-between', gap: '16px' }
+    const NUM = { fontVariantNumeric: 'tabular-nums' }
+    const DIM = { opacity: 0.7 }
+    const NOTE = { marginTop: '10px', fontSize: '11px', lineHeight: '16px', opacity: 0.7 }
 
     function usd(n) {
       if (n <= 0) return '$0'
@@ -36,23 +82,11 @@ window.__ModuleLoader__.load({
       return String(n)
     }
 
-    const PANEL = {
-      position: 'fixed', zIndex: 50, minWidth: '260px', maxWidth: '340px',
-      padding: '10px 12px', borderRadius: '8px',
-      background: 'var(--dsh-surface-raised, var(--dsh-surface, #1c1c1f))',
-      border: '1px solid var(--dsh-border, rgba(128,128,128,.28))',
-      boxShadow: '0 8px 24px rgba(0,0,0,.28)',
-      color: 'var(--dsh-text, inherit)', fontSize: '12px', lineHeight: '1.6',
-    }
-    const ROW = { display: 'flex', justifyContent: 'space-between', gap: '16px' }
-    const DIM = { opacity: 0.62 }
-
-    function row(label, value, dim) {
-      return h('div', { style: ROW },
-        h('span', { style: dim ? DIM : undefined }, label),
-        h('span', null, value))
+    function row(label, value) {
+      return h('div', { style: ROW }, h('span', null, label), h('span', { style: NUM }, value))
     }
 
+    /** 进度条。底槽透明度只写在背景色上 —— 外层 opacity 会被子元素继承相乘。 */
     function bar(ratio, color) {
       const pct = Math.max(0, Math.min(1, ratio)) * 100
       return h('span', {
@@ -75,15 +109,19 @@ window.__ModuleLoader__.load({
       const rootRef = React.useRef(null)
       const panelRef = React.useRef(null)
 
-      // 先算数据再挂钩子 —— 钩子必须无条件调用（React 规则）。
       const state = typeof useProjection === 'function' ? useProjection('goalBudget') : null
       const spent = state && state.spent ? state.spent : null
       const budget = state ? state.budget : null
 
+      // 钩子必须无条件调用（React 规则）。
       const pos = useAnchoredPosition({
         open: open && spent !== null,
-        anchorRef: rootRef, panelRef,
-        side: 'top', align: 'start', gap: 8, margin: 8,
+        anchorRef: rootRef,
+        panelRef,
+        side: 'top',
+        align: 'start',
+        gap: 8,
+        margin: 8,
       })
       useDismissOnOutsidePointer(rootRef, open, setOpen)
 
@@ -93,54 +131,61 @@ window.__ModuleLoader__.load({
       // 命中哪一维用哪一维 —— 与宿主 checkBudget「谁先到算谁」一致。
       let ratio = null
       let limitText = null
-      let usedText = null
+      let binding = null
       if (budget !== null && budget !== undefined) {
         const dims = []
-        if (budget.costUsd > 0) {
-          dims.push({ r: spent.costUsd / budget.costUsd, limit: usd(budget.costUsd), used: usd(spent.costUsd), dim: 'cost' })
-        }
-        if (budget.tokens > 0) {
-          dims.push({ r: spent.tokens / budget.tokens, limit: num(budget.tokens), used: num(spent.tokens), dim: 'tokens' })
-        }
+        if (budget.costUsd > 0) dims.push({ r: spent.costUsd / budget.costUsd, limit: usd(budget.costUsd), dim: 'cost' })
+        if (budget.tokens > 0) dims.push({ r: spent.tokens / budget.tokens, limit: num(budget.tokens), dim: 'tokens' })
         if (dims.length > 0) {
           const worst = dims.reduce((a, b) => (b.r > a.r ? b : a))
           ratio = worst.r
           limitText = worst.limit
-          usedText = worst.used
+          binding = worst.dim
         }
       }
 
       const over = ratio !== null && ratio >= 1
       const near = ratio !== null && ratio >= 0.8 && !over
-      const color = over ? 'var(--dsh-danger, #e5534b)'
-        : near ? 'var(--dsh-warning, #d29922)'
-        : 'var(--dsh-accent, #4a9eff)'
+      const color = over ? 'var(--dsw-alias-state-error, #e5534b)'
+        : near ? 'var(--dsw-alias-state-warning, #d29922)'
+        : 'var(--dsw-alias-state-success, #4a9eff)'
       const dotState = over ? 'error' : near ? 'warning' : 'done'
 
       const summary = ratio === null
-        ? `Session spend ${usd(spent.costUsd)} — no cap set, use /budget`
-        : `Session spend ${usedText} of ${limitText} budget, ${Math.round(ratio * 100)}% used`
+        ? `Session spend ${usd(spent.costUsd)}, no cap set`
+        : `Session spend ${usd(spent.costUsd)} of ${limitText} budget, ${Math.round(ratio * 100)} percent used`
 
-      const panel = open && pos !== null ? h('div', {
-        ref: panelRef, style: Object.assign({}, PANEL, pos), role: 'dialog', 'aria-label': summary,
-      },
-        h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, 'Goal budget'),
-        row('Spent', usd(spent.costUsd)),
-        row('Tokens', num(spent.tokens)),
-        budget === null || budget === undefined
-          ? h('div', { style: Object.assign({}, DIM, { marginTop: '6px' }) },
-              'No session cap. Run /budget $5 or /budget 500k to set one.')
-          : h('div', { style: { marginTop: '6px' } },
-              row('Budget', limitText),
-              row('Used', Math.round(ratio * 100) + '%'),
-              usedText === limitText ? null : row('Against', usedText, true)),
-        spent.unbilledTurns > 0
-          ? h('div', { style: Object.assign({}, DIM, { marginTop: '6px' }) },
-              spent.unbilledTurns + ' turn(s) reported no token usage and are not counted.')
-          : null,
-        h('div', { style: Object.assign({}, DIM, { marginTop: '6px', fontSize: '11px' }) },
-          'Priced by the host with the same math the gate uses.'),
-      ) : null
+      const pct = ratio === null ? null : Math.round(ratio * 100)
+
+      const panel = open
+        ? createPortal(
+            h('div', {
+              ref: panelRef,
+              role: 'dialog',
+              'aria-label': summary,
+              style: pos === null ? Object.assign({}, PANEL, MEASURE_STYLE) : Object.assign({}, PANEL, pos),
+            },
+              h('div', { style: TITLE },
+                h('span', null, 'Goal budget'),
+                pct === null ? null : h('span', { style: NUM }, pct + '%')),
+              h('div', { style: RULE }),
+              row('Spent', usd(spent.costUsd)),
+              row('Tokens', num(spent.tokens)),
+              budget === null || budget === undefined
+                ? h('div', { style: NOTE }, 'No session cap. Run /budget $5 or /budget 500k to set one.')
+                : h('div', null,
+                    row('Budget', limitText),
+                    row('Binding', binding === 'cost' ? 'cost' : 'tokens')),
+              spent.unbilledTurns > 0
+                ? h('div', { style: NOTE },
+                    spent.unbilledTurns + ' turn(s) reported no token usage and are not counted.')
+                : null,
+              h('div', { style: NOTE },
+                'Priced by the host with the same math the budget gate uses.'),
+            ),
+            document.body,
+          )
+        : null
 
       return h('span', { ref: rootRef, style: { display: 'inline-flex' } },
         h(Pill, {
