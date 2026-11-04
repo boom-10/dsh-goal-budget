@@ -17,11 +17,15 @@
 import z from '@deepseek-ai/schemastery'
 import type { Infer } from '@deepseek-ai/schemastery'
 import { addUsage, checkBudget, type GoalSpend, type Pricing, type TurnSpend } from './accounting.ts'
+import {
+  describeBudget, formatTokens, formatUsd, isUnlimited, parseBudgetCommand,
+  renderBudget, type Budget,
+} from './budget-command.ts'
 
 export const name = 'dsh-goal-budget'
 
 /** 声明进 inject 的服务 —— 缺一个都会在加载期抛「without inject」。 */
-export const inject = ['goals', 'sessions', 'agents'] as const
+export const inject = ['commands', 'goals', 'sessions', 'agents'] as const
 
 export const Config = z.object({
   budget: z
@@ -60,7 +64,22 @@ type _SchemaMatchesInterface = Infer<typeof Config> extends GoalBudgetConfig ? t
 const _check: _SchemaMatchesInterface = true
 void _check
 
+type BudgetInvocation = {
+  agent: object
+  rawInput: string
+}
+
 type Ctx = {
+  /** 出处：packages/interaction/commands/src/index.ts:285 */
+  commands: {
+    register(definition: {
+      definitionId?: unknown
+      name: string
+      description: string
+      input?: { hint: string }
+      handler: (invocation: BudgetInvocation) => { kind: 'success'; text?: string } | { kind: 'error'; text: string }
+    }): () => void
+  }
   on: (event: string, listener: (...args: never[]) => void) => void
   logger: { warn: (msg: string) => void; info: (msg: string) => void }
   get: (name: string) => unknown
@@ -119,13 +138,31 @@ const emptyTurn = (turn: number): TurnSpend => ({
 })
 
 export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
-  const budget = config.budget ?? { tokens: 0, costUsd: 0 }
+  // ── 存储方案 C：profile 默认 + 会话覆盖 ──
+  //
+  // profile 里配的是**默认值**，适合预算固定的人；
+  // `/budget` 写的**会话覆盖**优先，适合临时收紧。
+  // 覆盖用 WeakMap 以 agent 为键 —— agent 就是会话的作用域，且不阻止回收。
+  const profileBudget: Budget = {
+    tokens: config.budget?.tokens ?? 0,
+    costUsd: config.budget?.costUsd ?? 0,
+  }
+  const sessionOverrides = new WeakMap<object, Budget>()
+
+  /** 解析某会话当前生效的预算，并说明它从哪来。 */
+  const resolveBudget = (agent: object): { budget: Budget; source: 'session' | 'profile' } => {
+    const override = sessionOverrides.get(agent)
+    return override === undefined
+      ? { budget: profileBudget, source: 'profile' }
+      : { budget: override, source: 'session' }
+  }
+
   const pricing: Pricing = config.pricing ?? {
     inputPerMillion: 0.15,
     outputPerMillion: 0.6,
     cacheReadPerMillion: 0.003,
   }
-  const unlimited = (budget.tokens ?? 0) <= 0 && (budget.costUsd ?? 0) <= 0
+  const unlimited = isUnlimited(profileBudget)
 
   // 启动日志。
   //
@@ -136,9 +173,58 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
   console.log(
     `[goal-budget] 已加载 · inject=[${inject.join(',')}] · ` +
       (unlimited
-        ? '未配置预算，空转中（设置 budget.tokens 或 budget.costUsd 后生效）'
-        : `预算 tokens=${budget.tokens ?? 0} costUsd=${budget.costUsd ?? 0} · 超限动作=${config.onExceed}`),
+        ? 'profile 未设默认预算 —— 用 /budget 按会话设置，或在 cordis.patch.yml 里配 budget'
+        : `默认预算 ${describeBudget(profileBudget)} · 超限动作=${config.onExceed} · /budget 可按会话覆盖`),
   )
+
+  /**
+   * `/budget` —— 会话级预算控制。
+   *
+   * 为什么用命令而不是只靠 Config：Config 是**部署配置**（启动时读、改完要重启、
+   * profile 级），而预算是**运行时决策**（按会话、随时改）。把预算只放在 yaml 里
+   * 是用错了层。
+   *
+   * 沿用官方 `/goal` 的注册模式（packages/goal/command-goal/src/index.ts:190）。
+   */
+  ctx.commands.register({
+    definitionId: 'dsh-goal-budget',
+    name: 'budget',
+    description: 'Set or view the resource budget for this session',
+    input: { hint: '[<$usd>|<tokens>|off]' },
+    handler: (invocation) => {
+      const parsed = parseBudgetCommand(invocation.rawInput)
+
+      switch (parsed.kind) {
+        case 'show': {
+          const { budget, source } = resolveBudget(invocation.agent)
+          return { kind: 'success', text: renderBudget(budget, source, usedFor(invocation.agent)) }
+        }
+        case 'set': {
+          sessionOverrides.set(invocation.agent, parsed.budget)
+          // 改了预算就重置「已阻断」标记，否则调高预算后不会重新生效。
+          const l = ledgers.get(invocation.agent)
+          if (l) l.blocked.clear()
+          return {
+            kind: 'success',
+            text: `本会话预算已设为 ${describeBudget(parsed.budget)}。\n` +
+              '超过时会阻断当前 goal 并停止自动续跑。用 /budget off 恢复 profile 默认。',
+          }
+        }
+        case 'clear': {
+          sessionOverrides.delete(invocation.agent)
+          const l = ledgers.get(invocation.agent)
+          if (l) l.blocked.clear()
+          const { budget } = resolveBudget(invocation.agent)
+          return {
+            kind: 'success',
+            text: `已恢复 profile 默认预算：${describeBudget(budget)}`,
+          }
+        }
+        case 'invalid':
+          return { kind: 'error', text: parsed.reason }
+      }
+    },
+  })
 
   if (unlimited) return
 
@@ -181,10 +267,26 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
       spend.rounds.set(own.round, next)
       if (!next.attributable) spend.unattributableTurns += 1
       void session
-      evaluate(ctx, l, own.goalId, own.agent, config)
+      const { budget: effective } = resolveBudget(own.agent)
+      evaluate(ctx, l, own.goalId, own.agent, effective, config.onExceed, config.warnAtRatio ?? 0)
       return
     }
   }) as never)
+}
+
+/** 某会话所有 goal 的累计用量 —— 给 `/budget` 显示用。 */
+function usedFor(agent: object): { tokens: number; costUsd: number } | undefined {
+  const l = ledgers.get(agent)
+  if (!l) return undefined
+  let tokens = 0
+  let costUsd = 0
+  for (const spend of l.byGoal.values()) {
+    for (const t of spend.rounds.values()) {
+      tokens += t.inputTokens + t.outputTokens + t.reasoningTokens
+      costUsd += t.costUsd
+    }
+  }
+  return { tokens, costUsd }
 }
 
 /** 遍历用的活跃账本集合。 */
@@ -193,13 +295,23 @@ function allLedgers(): Set<Ledger> {
 }
 
 /** ③ 判定 + 阻断。 */
-function evaluate(ctx: Ctx, l: Ledger, goalId: string, agent: object, config: GoalBudgetConfig): void {
+function evaluate(
+  ctx: Ctx,
+  l: Ledger,
+  goalId: string,
+  agent: object,
+  // ★ 传入【已解析】的预算 —— 之前这里读 config.budget，
+  //    导致 /budget 写的会话覆盖完全不起作用（测试抓到的 bug）。
+  budget: Budget,
+  onExceed: 'block' | 'warn',
+  warnAtRatio: number,
+): void {
   const spend = l.byGoal.get(goalId)
   if (!spend) return
-  const verdict = checkBudget(spend, config.budget ?? {})
+  const verdict = checkBudget(spend, budget)
 
   // 告警档位（去重）
-  const warnAt = config.warnAtRatio ?? 0
+  const warnAt = warnAtRatio
   if (warnAt > 0 && !verdict.exceeded && verdict.ratio >= warnAt) {
     const key = `${goalId}:${Math.floor(verdict.ratio * 10) / 10}`
     if (!l.warned.has(key)) {
@@ -221,7 +333,7 @@ function evaluate(ctx: Ctx, l: Ledger, goalId: string, agent: object, config: Go
       ? ` (${spend.unattributableTurns} turn(s) reported no usage and are not counted)`
       : '')
 
-  if (config.onExceed === 'warn') {
+  if (onExceed === 'warn') {
     ctx.logger.warn(`[goal-budget] ${message}`)
     l.blocked.add(goalId)
     return

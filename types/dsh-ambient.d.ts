@@ -139,3 +139,35 @@ declare module '@deepseek-ai/dsh-agent' {
     readonly turn: number
   }
 }
+
+// ─────────────────────────────────────────────────────────────
+// @deepseek-ai/dsh-commands
+// 出处：packages/interaction/commands/src/index.ts:41,61 / types.ts:34
+// ─────────────────────────────────────────────────────────────
+declare module '@deepseek-ai/dsh-commands' {
+  /** 出处：packages/interaction/commands/src/index.ts:41 */
+  export interface CommandInvocation {
+    readonly commandId: string
+    /** ★ 当前会话的 agent —— 按会话设置预算就是靠它做键。 */
+    readonly agent: object
+    /** 命令名之后的原始输入（含前导空白）。 */
+    readonly rawInput: string
+    readonly attachments: readonly unknown[]
+    readonly signal: AbortSignal
+  }
+
+  /** 出处：packages/interaction/commands/src/types.ts:34 */
+  export type CommandResult =
+    | { readonly kind: 'success'; readonly text?: string }
+    | { readonly kind: 'error'; readonly text: string }
+
+  /** 出处：packages/interaction/commands/src/index.ts:61 */
+  export interface CommandDefinition {
+    readonly definitionId?: unknown
+    /** 小写、不带前导斜杠。 */
+    readonly name: string
+    readonly description: string
+    readonly input?: { readonly hint: string; readonly attachments?: boolean }
+    readonly handler: (invocation: CommandInvocation) => CommandResult | Promise<CommandResult>
+  }
+}

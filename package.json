@@ -1,6 +1,6 @@
 {
   "name": "dsh-goal-budget",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Resource budget for DeepSeek Harness goals: attribute token spend to the current goal and block it when a configured budget is exhausted.",
   "type": "module",
   "license": "MIT",
@@ -42,7 +42,7 @@
   "scripts": {
     "build": "esbuild src/index.ts --bundle --format=esm --platform=node --outfile=lib/index.js --external:@deepseek-ai/*",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --experimental-strip-types test/loader.spec.ts",
+    "test": "node --experimental-strip-types test/loader.spec.ts && node --experimental-strip-types test/budget-command.spec.ts",
     "prepublishOnly": "npm run typecheck && npm run test && npm run build"
   },
   "repository": {
@@ -53,5 +53,8 @@
   "bugs": {
     "url": "https://github.com/boom-10/dsh-goal-budget/issues"
   },
-  "author": "Jiangdong Chen"
+  "author": "Jiangdong Chen",
+  "devDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.5"
+  }
 }

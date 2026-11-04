@@ -51,6 +51,34 @@ That sentence names three missing pieces. This plugin fills two of them:
 
 ---
 
+## Set a budget
+
+**Per session, from the chat box** — no restart, no config file:
+
+```
+/budget            show the effective budget and what you have used
+/budget $5         cap this session at 5 USD
+/budget 500k       cap it at 500k tokens
+/budget $5 500k    cap both; whichever is reached first wins
+/budget off        drop the session override and fall back to the profile default
+```
+
+The budget is resolved as **session override ?? profile default**, so a fixed allowance can live in config and a one-off tightening costs one line in the composer.
+
+**Or as a profile default**, for an allowance you always want:
+
+```yaml
+- id: dsh-goal-budget
+  config:
+    budget:
+      tokens: 2000000
+      costUsd: 5.00
+    onExceed: block        # or 'warn' to only log
+    warnAtRatio: 0.8
+```
+
+Why both layers: a budget is a **runtime decision** — it changes per session — while plugin config is a **deployment decision** read at boot. Putting the budget only in config forces a restart to change something you decide in the moment. `/budget` writes a session-scoped override; config supplies the default.
+
 ## Install
 
 ```sh
@@ -65,19 +93,7 @@ dsh plugin --profile desktop add github:boom-10/dsh-goal-budget
 
 When installing from a **local path**, pnpm links the package and warns that `peerDependencies` will not resolve from the target `node_modules`. That warning is expected here: `@deepseek-ai/cordis` and `@deepseek-ai/schemastery` are provided by the host at runtime. Use the `file:` protocol if it bothers you.
 
-Then set a budget in your profile's `cordis.patch.yml`:
-
-```yaml
-- id: dsh-goal-budget
-  config:
-    budget:
-      tokens: 2000000      # cumulative input + output + reasoning tokens
-      costUsd: 5.00        # or a spend ceiling, in USD
-    onExceed: block        # or 'warn' to only log
-    warnAtRatio: 0.8       # log once when 80% is used
-```
-
-With no budget configured the plugin loads and idles.
+With no budget configured the plugin loads and idles, and `/budget` is how you set one.
 
 ### Pricing
 
@@ -143,8 +159,9 @@ block(agent: Agent, ref: GoalRef, reason: GoalBlockReason): GoalView
 | Read spend | `session/event` → `assistant/message` | Durable fact; replays across restarts. `agent/assistant-stream` is presentation data, not a replay source. |
 | Attribute to a goal | `agent/inbox/claimed` | The only message↔turn link that exists. |
 | Enforce | `ctx.goals.block()` | Documented policy entry point; disarms in the same call. |
-| Configuration | `@deepseek-ai/schemastery` `Config` | Deployment-varying choices must be validated config, not constants. |
-| Service access | `inject = ['goals', 'sessions', 'agents']` | Same set as the in-tree continuation driver. |
+| Configuration | `@deepseek-ai/schemastery` `Config` | The profile-level default; validated, not a constant. |
+| Per-session control | `ctx.commands.register()` | Budgets are runtime decisions. Same mechanism the official `/goal` command uses. |
+| Service access | `inject = ['commands', 'goals', 'sessions', 'agents']` | The first three `goals`/`sessions`/`agents` match the in-tree continuation driver. |
 
 ---
 
@@ -155,6 +172,8 @@ block(agent: Agent, ref: GoalRef, reason: GoalBlockReason): GoalView
 **Letting the model police itself via a tool.** The harness already notes the weakness of self-assessment (*"No independent evaluator — the model-facing goal policy decides when evidence is sufficient"*). Asking the constrained party to enforce its own constraint fails exactly when the budget is exhausted and judgment is worst — and it costs another model call *after* the budget is already gone.
 
 **Building the 44th cost dashboard.** The ecosystem has that covered, and a dashboard cannot stop anything.
+
+**Putting the budget only in plugin config.** The first version did, and it was wrong: config is read at boot, so changing a budget meant editing YAML and restarting — for a value you decide per session. A per-session budget needs a per-session surface, which is why `/budget` exists and config keeps only the default.
 
 ---
 
@@ -172,6 +191,8 @@ Known, with current mitigation and what is still unsolved.
 | 6 | Race with the continuation driver | a round starts after the block | `block()` disarms in the same call; ledgers cleared on dispose | A round already accepted but not yet run (the unload race the driver's README documents) |
 | 7 | A ledger is registered in one structure but not the other | **attribution silently stops working** — no error | Both structures are maintained together and asserted by tests | None known |
 | 8 | Startup log invisible at INFO level | plugin looks unloaded | Startup visibility uses `console.log`; alerts use `logger.warn` | Verbosity is not yet configurable |
+| 9 | `/budget` override is process-local | a restart returns the session to the profile default | The command's own input is recorded in the session log, so an operator can see what was set | Overrides do not survive a restart; re-issue the command |
+| 10 | A budget is blocking a goal, then raised | spend already over the old limit, but nothing re-checks | Setting or clearing a budget clears the blocked marker so the next step re-evaluates | A goal already `blocked` stays blocked until the operator resumes it |
 
 Number 7 is the one to watch: it fails *silently*. So does number 8. Both were found by testing behaviour rather than checking for absence of errors — the same shape as the harness's own post-mortem 0001, where 178 green tests and 100% line coverage coexisted with a completely non-functional feature.
 
@@ -184,10 +205,12 @@ At a 90% cache-hit ratio, ignoring `cacheReadTokens` overstates cost by **2.7×*
 ## Development
 
 ```sh
-npm run typecheck   # tsc, zero external @deepseek-ai dependencies
-npm test            # loader-path test; no API key needed
+npm run typecheck   # tsc
+npm test            # both specs; no API key needed
 npm run build       # esbuild bundle → lib/index.js
 ```
+
+Two suites: `test/loader.spec.ts` asserts the export shape through the real `unwrapExports` semantics, and `test/budget-command.spec.ts` drives the `/budget` handler and asserts that a session override actually changes the blocking threshold, that clearing it stops blocking, and that one goal is never blocked twice.
 
 Types for the harness APIs this plugin uses live in [`types/dsh-ambient.d.ts`](types/dsh-ambient.d.ts), each annotated with its source file and line. That file doubles as the dependency manifest — it is the complete list of harness surface this plugin touches, and it costs no install.
 
