@@ -57,6 +57,14 @@ That sentence names three missing pieces. This plugin fills two of them:
 dsh plugin --profile desktop add dsh-goal-budget
 ```
 
+`dsh plugin` forwards to `pnpm` inside the profile directory, so a git reference works too — useful before an npm release:
+
+```sh
+dsh plugin --profile desktop add github:boom-10/dsh-goal-budget
+```
+
+When installing from a **local path**, pnpm links the package and warns that `peerDependencies` will not resolve from the target `node_modules`. That warning is expected here: `@deepseek-ai/cordis` and `@deepseek-ai/schemastery` are provided by the host at runtime. Use the `file:` protocol if it bothers you.
+
 Then set a budget in your profile's `cordis.patch.yml`:
 
 ```yaml
