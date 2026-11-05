@@ -547,7 +547,21 @@ function evaluate(
     ctx.logger.warn(`[goal-budget] 超预算但读不到当前 goal，无法阻断：${message}`)
     return
   }
-  ctx.goals.block(agent, { id: goal.id, revision: goal.revision }, { code: 'budget-exceeded', message })
+  // block() 只接受 active 的 goal。用户可能刚暂停或完成了它，这时它已经不在运行，
+  // 不再阻断。这里不记入 blocked：它恢复 active 后，下一次事件仍会正确判定。
+  if (goal.phase !== 'active') {
+    ctx.logger.warn(`[goal-budget] 超预算，但 goal ${goalId} 当前是 ${goal.phase}，本次不阻断`)
+    return
+  }
+  try {
+    ctx.goals.block(agent, { id: goal.id, revision: goal.revision }, { code: 'budget-exceeded', message })
+  } catch (error) {
+    // revision 已变（比如用户刚编辑过 goal）时 block() 会抛错。不让它冒泡到事件回调里；
+    // 不记入 blocked，下一次事件会用最新的 goal 重试。
+    const reason = error instanceof Error ? error.message : String(error)
+    ctx.logger.warn(`[goal-budget] 阻断 goal ${goalId} 失败：${reason}`)
+    return
+  }
   l.blocked.add(goalId)
   ctx.logger.warn(`[goal-budget] 已阻断 goal ${goalId}：${message}`)
 }

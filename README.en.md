@@ -88,12 +88,13 @@ Durations use only the timestamp each session event already carries (`SessionEve
 ## Install
 
 ```sh
-dsh plugin --profile desktop add github:boom-10/dsh-goal-budget
+dsh plugin --profile desktop add dsh-goal-budget                 # from npm
+dsh plugin --profile desktop add github:boom-10/dsh-goal-budget  # from GitHub
 ```
 
 Then **restart DSH** — both halves of the plugin load at boot.
 
-`dsh plugin` forwards to `pnpm` inside the profile directory, so a local path works too.
+`dsh plugin` forwards to `pnpm` inside the profile directory, so a local path works too. **The bare-name form resolves through your npm registry**: if your default registry is an internal proxy that has not mirrored this package yet, `add dsh-goal-budget` fails with `ERR_PNPM_NO_VERSIONS` (the author hit exactly that — this machine's default registry is a company proxy); use the GitHub form there. A pinned form such as `...@0.10.0` does **not** work with either source, so do not use it.
 
 > When installing from a **local path**, pnpm warns that `peerDependencies` will not resolve from the target `node_modules`. **That warning is expected here**: `@deepseek-ai/cordis` and `@deepseek-ai/schemastery` are provided by the host at runtime. Use the `file:` protocol if it bothers you.
 

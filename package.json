@@ -1,6 +1,6 @@
 {
   "name": "dsh-goal-budget",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Resource budget for DeepSeek Harness goals: attribute token spend to the current goal and block it when a configured budget is exhausted.",
   "type": "module",
   "license": "MIT",
@@ -58,7 +58,7 @@
   "scripts": {
     "build": "esbuild src/index.ts --bundle --format=esm --platform=node --outfile=lib/index.js --external:@deepseek-ai/*",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --experimental-strip-types test/loader.spec.ts && node --experimental-strip-types test/budget-command.spec.ts && node --experimental-strip-types test/accounting.spec.ts && node --experimental-strip-types test/projection-view.spec.ts && node --experimental-strip-types test/client-pill.spec.ts",
+    "test": "node --experimental-strip-types test/accounting.spec.ts && node --experimental-strip-types test/budget-command.spec.ts && node --experimental-strip-types test/budget-currency.spec.ts && node --experimental-strip-types test/client-pill.spec.ts && node --experimental-strip-types test/currency-detect.spec.ts && node --experimental-strip-types test/host-currency.spec.ts && node --experimental-strip-types test/host-session-budget.spec.ts && node --experimental-strip-types test/loader.spec.ts && node --experimental-strip-types test/projection-view.spec.ts && node --experimental-strip-types test/tariff.spec.ts && node --experimental-strip-types test/wallclock.spec.ts && node --experimental-strip-types test/block-guard.spec.ts",
     "prepublishOnly": "npm run typecheck && npm run test && npm run build"
   },
   "repository": {
@@ -72,6 +72,9 @@
   "author": "Jiangdong Chen",
   "devDependencies": {
     "@deepseek-ai/schemastery": "^3.18.5",
+    "@types/node": "^24.19.2",
+    "esbuild": "^0.25.12",
+    "typescript": "^5.9.3",
     "zod": "^4.0.0"
   },
   "publishConfig": {

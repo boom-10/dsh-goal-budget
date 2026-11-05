@@ -79,12 +79,13 @@ ctx.goals.block(agent, { id, revision }, {
 ## 安装
 
 ```sh
-dsh plugin --profile desktop add github:boom-10/dsh-goal-budget
+dsh plugin --profile desktop add dsh-goal-budget                 # npm 源
+dsh plugin --profile desktop add github:boom-10/dsh-goal-budget  # GitHub 源
 ```
 
 装完**重启 DSH**（插件的宿主半边和客户端半边都在启动时加载）。
 
-`dsh plugin` 会把参数转发给 profile 目录里的 `pnpm`，所以 git 引用、本地路径都能用。
+`dsh plugin` 会把参数转发给 profile 目录里的 `pnpm`，所以 git 引用、本地路径都能用。**包名形式由你的 npm registry 决定解析结果**：如果本机默认 registry 是公司内网代理、而它还没同步到这个包，`add dsh-goal-budget` 会报 `ERR_PNPM_NO_VERSIONS`（作者本机就踩到了：默认 registry 是公司的代理）——这时改用上面的 GitHub 源即可。反过来，`...@0.10.0` 这种带版本号的形式在两种源上都**不可用**，别写。
 
 > **从本地路径安装时**，pnpm 会警告 `peerDependencies` 无法从目标 `node_modules` 解析。**这个警告在这里是预期的** —— `@deepseek-ai/cordis` 和 `@deepseek-ai/schemastery` 由宿主在运行时提供。介意的话用 `file:` 协议。
 

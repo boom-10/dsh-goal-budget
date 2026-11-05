@@ -30,7 +30,7 @@ mod.apply({
   on: (event: string, listener: Listener) => { listeners.set(event, listener) },
   logger: { warn: () => {}, info: () => {} },
   get: () => undefined,
-  goals: { get: () => ({ id: 'goal-A', revision: 1 }), block: (_a: unknown, _r: unknown, reason: { code?: string; message?: string }) => { blocks.push(reason) } },
+  goals: { get: () => ({ id: 'goal-A', revision: 1, phase: 'active' }), block: (_a: unknown, _r: unknown, reason: { code?: string; message?: string }) => { blocks.push(reason) } },
 } as never, {
   // ★ profile 没有任何默认预算 —— 这正是本文件要覆盖的场景
   budget: { tokens: 0, costUsd: 0, wallClockMs: 0 },

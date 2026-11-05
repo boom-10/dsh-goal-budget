@@ -39,7 +39,7 @@ const ctx = {
   logger: { warn: (s: string) => warns.push(s), info: () => {} },
   get: () => undefined,
   goals: {
-    get: () => ({ id: 'goal-A', revision: 3 }),
+    get: () => ({ id: 'goal-A', revision: 3, phase: 'active' }),
     block: (_a: unknown, ref: unknown, reason: { code: string; message: string }) => {
       blocked.push({ ref, reason })
       return {}
