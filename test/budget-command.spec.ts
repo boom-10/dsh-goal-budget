@@ -59,9 +59,10 @@ mod.apply(ctx as never, {
 })
 
 const fire = (e: string, ...a: unknown[]) => { for (const fn of handlers.get(e) ?? []) fn(...a) }
-const agent = {}
 // 同一个会话对象贯穿全部事件（宿主里它是稳定的）。
 const session = {}
+// agent 是会话的作用域，真实 Agent 上有 session 字段（归因按会话隔离）。
+const agent = { session }
 // 北京时间 2026-11-03 12:00（周二，空闲时段）：宿主按事件时间定峰谷，测试取空闲价以保持金额期望不变。
 const OFF_PEAK = Date.UTC(2026, 10, 3, 4)
 // 会话的请求头：计价按它查模型的单价。没有它，用量会被当成未定价、费用为 0。

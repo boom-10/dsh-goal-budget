@@ -26,7 +26,7 @@ import {
   describeBudget, formatDuration, formatTokens, formatUsd, isUnlimited,
   parseBudgetCommand, renderBudget, type Budget,
 } from './budget-command.ts'
-import { createGoalBudgetProjection } from './budget-projection.ts'
+import { createGoalBudgetProjection, type GoalBudgetState } from './budget-projection.ts'
 
 export const name = 'dsh-goal-budget'
 
@@ -84,6 +84,15 @@ type BudgetInvocation = {
   rawInput: string
 }
 
+/**
+ * 投影注册句柄。`stateOf` 是**同步**的（session-projection/src/index.ts:60），
+ * 所以宿主判定路径上可以直接读，不需要 await。
+ */
+type ProjectionHandle = {
+  readonly dispose?: () => void
+  stateOf?(session: object): GoalBudgetState | undefined
+}
+
 type Ctx = {
   /** 出处：packages/interaction/commands/src/index.ts:285 */
   commands: {
@@ -95,9 +104,9 @@ type Ctx = {
       handler: (invocation: BudgetInvocation) => { kind: 'success'; text?: string } | { kind: 'error'; text: string }
     }): () => void
   }
-  /** 出处：packages/session/session-projection/src/index.ts（register 返回 disposer） */
+  /** 出处：packages/session/session-projection/src/index.ts:438 —— 句柄带同步的 stateOf。 */
   sessionProjections: {
-    register(definition: unknown): Promise<{ readonly dispose?: () => void }>
+    register(definition: unknown): Promise<ProjectionHandle>
   }
   on: (event: string, listener: (...args: never[]) => void) => void
   logger: { warn: (msg: string) => void; info: (msg: string) => void }
@@ -113,13 +122,19 @@ type Ctx = {
  * ⚠️ 两个结构必须同时维护；只写一个会让归因静默失效。
  */
 const ledgers = new WeakMap<object, Ledger>()
-const liveLedgers = new Set<Ledger>()
+/**
+ * 会话 → (turn → 归属)。
+ *
+ * ★ 必须按**会话**隔离：`turn` 号只在会话内唯一，两个会话同时进行时会重复。
+ *   OBSERVED（0.9.2 修）：原先的归属表挂在每个账本上、事件处理时**遍历所有账本**按 turn 匹配，
+ *   谁先命中就算谁的 —— 于是 B 会话的花费被记到 A 会话的目标上，A 的预算可能被提前阻断，
+ *   而 B 自己的预算永远看不到自己的用量。对一个以归因为卖点的插件，这是硬伤。
+ */
+const ownershipBySession = new WeakMap<object, Map<number, { goalId: string; round: number; agent: object }>>()
 /** 每个会话当前请求头的路由（provider、model）：计价按它查模型的单价。 */
 const routeBySession = new WeakMap<object, { provider?: string; model?: string }>()
 
 type Ledger = {
-  /** turn → 这个 turn 属于哪个 goal 的哪一轮（来自 agent/inbox/claimed） */
-  ownership: Map<number, { goalId: string; round: number; agent: object }>
   /** goalId → 累计消费 */
   byGoal: Map<string, GoalSpend>
   /** 已经提醒过的比例档位，避免每轮都注入 */
@@ -131,9 +146,8 @@ type Ledger = {
 function ledgerFor(agent: object): Ledger {
   let l = ledgers.get(agent)
   if (!l) {
-    l = { ownership: new Map(), byGoal: new Map(), warned: new Set(), blocked: new Set() }
+    l = { byGoal: new Map(), warned: new Set(), blocked: new Set() }
     ledgers.set(agent, l)
-    liveLedgers.add(l)          // ← 与 WeakMap 同步维护，缺这行归因会静默失效
   }
   return l
 }
@@ -216,12 +230,33 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
    * 顺带让「重启后预算还在」成立：日志里有 `/budget` 事件，状态就能重建。
    */
   // 单价与宿主 Config 同源 —— 客户端显示的数就是阻断判定用的数。
-  const projectionHandle = ctx.sessionProjections.register(createGoalBudgetProjection(() => currency, config.modelAliases))
-  // register 可能是异步的；失败不能拖垮插件加载（postmortem 0001 的教训：
-  // 加载期的异常会让整个 fiber 失败）。
-  void Promise.resolve(projectionHandle).catch((error: unknown) => {
-    ctx.logger.warn(`[goal-budget] goalBudget 投影注册失败，客户端将读不到预算：${String(error)}`)
-  })
+  let projection: ProjectionHandle | undefined
+  void Promise.resolve(ctx.sessionProjections.register(createGoalBudgetProjection(() => currency, config.modelAliases))).then(
+    (handle) => {
+      projection = handle
+    },
+    // register 可能是异步的；失败不能拖垮插件加载（postmortem 0001 的教训：
+    // 加载期的异常会让整个 fiber 失败）。
+    (error: unknown) => {
+      ctx.logger.warn(`[goal-budget] goalBudget 投影注册失败，客户端将读不到预算：${String(error)}`)
+    },
+  )
+
+  /**
+   * 本会话当前的路由。
+   *
+   * 优先用本进程看到的 `request/header`。没有时（插件在会话中途加载、或重启后模型没变，
+   * 宿主不会再收到新的请求头）退回**投影**读 —— 投影 fold 了整份日志，包含插件加载之前的
+   * 请求头。不这么做的话，重启后的花费会被当成不计价，费用维度的闸门静默失效（失败模式 #13）。
+   */
+  const routeOf = (session: object): { provider?: string; model?: string } | undefined => {
+    const seen = routeBySession.get(session)
+    if (seen !== undefined) return seen
+    const fromLog = projection?.stateOf?.(session)?.route
+    if (fromLog === undefined || fromLog === null) return undefined
+    routeBySession.set(session, fromLog)
+    return fromLog
+  }
 
   // 启动日志。
   //
@@ -292,7 +327,12 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
     },
   })
 
-  if (unlimited) return
+  // ★ 不因为「profile 没设默认预算」就跳过监听器注册。
+  //
+  // OBSERVED（0.9.1 修）：这里原本是 `if (unlimited) return`，于是只用 /budget 设置预算的会话
+  // —— 也就是文档主推的用法 —— 命令会成功、pill 也会显示数字（投影在 return 之前已注册），
+  // 但用量**完全没记账**，预警与阻断永远不会触发。这是最糟的一类缺陷：看起来一切正常。
+  // 预算可以在运行时随时加上，所以监听器必须无条件注册。
 
   /**
    * ① 归因：`agent/inbox/claimed` 是**唯一**能把消息关联到 turn 的事件。
@@ -305,16 +345,19 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
     const src = payload.message?.source
     if (src?.kind !== 'goal' || typeof src.round !== 'number') return
     if (src.round <= 0) return // round 0 是人工创建 goal 的那条消息，不算自动轮次
-    ledgerFor(payload.agent).ownership.set(payload.turn, {
-      goalId: String(src.goalId),
-      round: src.round,
-      agent: payload.agent,
-    })
-  }) as never)
-
-  /** 卸载时清空账本，避免插件重载后带着旧状态。 */
-  ctx.on('dispose', (() => {
-    liveLedgers.clear()
+    // 归属按「会话 + turn」登记。拿不到会话宁可**不归因**，也不能记到别的会话头上。
+    const session = (payload.agent as { session?: object }).session
+    if (session === undefined) {
+      ctx.logger.warn('[goal-budget] 这条 goal 消息取不到所属会话，本轮用量不会记账')
+      return
+    }
+    let owners = ownershipBySession.get(session)
+    if (owners === undefined) {
+      owners = new Map()
+      ownershipBySession.set(session, owners)
+    }
+    owners.set(payload.turn, { goalId: String(src.goalId), round: src.round, agent: payload.agent })
+    ledgerFor(payload.agent)
   }) as never)
 
   /**
@@ -346,9 +389,12 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
     const turn = data?.turn
     if (typeof turn !== 'number') return
 
-    for (const l of allLedgers()) {
-      const own = l.ownership.get(turn)
-      if (!own) continue
+    // 归属按 (会话, turn) 查 —— 不跨会话扫描（见 ownershipBySession 的说明）。
+    const owned = ownershipBySession.get(session)?.get(turn)
+    if (owned === undefined) return
+    const l = ledgerFor(owned.agent)
+    {
+      const own = owned
       const spend = spendFor(l, own.goalId)
       const prev = spend.rounds.get(own.round) ?? emptyTurn(turn)
 
@@ -364,7 +410,7 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
       // assistant/message —— 保险：若 turn/start 在归因建立之前就到了，
       // 这里补开这一轮，否则 startedAt 会一直是 undefined，时长恒为 0。
       const opened = at === undefined ? prev : openRound(prev, at)
-      const route = routeBySession.get(session)
+      const route = routeOf(session)
       const model = canonicalDeepSeekModel(route?.model, config.modelAliases)
       const pricing = model === undefined || currency === undefined || at === undefined
         ? undefined
@@ -373,7 +419,6 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
       const next = addUsage(opened, data?.usage, pricing ?? UNPRICED, at)
       spend.rounds.set(own.round, next)
       if (!next.attributable) spend.unattributableTurns += 1
-      void session
       const { budget: effective } = resolveBudget(own.agent)
       evaluate(ctx, l, own.goalId, own.agent, costInCurrency(effective, currency), config.onExceed, config.warnAtRatio ?? 0)
       return
@@ -410,11 +455,6 @@ function usedFor(agent: object): { tokens: number; costUsd: number; wallClockMs:
     wallClockMs += t.wallClockMs
   }
   return { tokens, costUsd, wallClockMs }
-}
-
-/** 遍历用的活跃账本集合。 */
-function allLedgers(): Set<Ledger> {
-  return liveLedgers
 }
 
 /** ③ 判定 + 阻断。 */
