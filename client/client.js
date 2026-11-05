@@ -58,6 +58,7 @@ window.__ModuleLoader__.load({
         noCapHint: '用 /budget $5 或 /budget 500k 设置',
         unbilled: '{count} 轮未上报 token 用量，未计入',
         provenance: '由宿主计价，与预算判定同一套算法',
+        notCounted: '未计价',
         unpriced: '未计价：{models}（费用未计入，请在价格表里配置）',
         currencyUnknown: '账户币种未识别，费用暂不计入；请在配置里设置 currency（USD 或 CNY）',
         summaryNone: '本会话已花费 {cost}，未设上限',
@@ -75,6 +76,7 @@ window.__ModuleLoader__.load({
         noCapHint: 'Set one with /budget $5 or /budget 500k',
         unbilled: '{count} turn(s) reported no token usage and are not counted',
         provenance: 'Priced by the host with the same math the budget gate uses',
+        notCounted: 'not counted',
         unpriced: 'No price for {models}; its cost is not counted (add it to the price table)',
         currencyUnknown: 'Account currency not detected yet; cost is not counted. Set currency (USD or CNY) in the config.',
         summaryNone: 'Session spend {cost}, no cap set',
@@ -93,8 +95,10 @@ window.__ModuleLoader__.load({
       position: 'fixed',
       zIndex: 1100,
       boxSizing: 'border-box',
-      width: 'max-content',
-      minWidth: 'min(210px, calc(100vw - 24px), var(--dsh-anchored-max-width, 100vw))',
+      // ★ 固定宽度，不用 max-content：钩子在「隐藏但参与布局」的首帧测量尺寸，
+      //   宽度若由内容决定，测量值与被 max-width 压窄后的最终值不一致，
+      //   align:'end' 的右缘就对不齐 pill（OBSERVED：右缘偏左、上边距偏大）。
+      width: 'min(320px, calc(100vw - 24px), var(--dsh-anchored-max-width, 100vw))',
       maxWidth: 'min(320px, calc(100vw - 24px), var(--dsh-anchored-max-width, 100vw))',
       maxHeight: 'var(--dsh-anchored-max-height, none)',
       overflowX: 'hidden',
@@ -121,6 +125,25 @@ window.__ModuleLoader__.load({
     const NOTE = { marginTop: '10px', fontSize: '11px', lineHeight: '16px', opacity: 0.7 }
 
     /** 金额按币种显示：人民币为 ¥，其余（含未指定）为 $。 */
+    /** 模型名太长，只显示最后一段（与计价用的归一化规则一致）。 */
+    function shortModel(name) {
+      const tail = String(name).split(/[/:]/).pop()
+      const dash = tail.lastIndexOf('--')
+      return dash === -1 ? tail : tail.slice(dash + 2)
+    }
+
+    /**
+     * 分模型明细：让「哪部分算了钱、哪部分没算」一眼可见。
+     * 之前只给总数，看不出 DeepSeek 那部分到底有没有计价（OBSERVED 的用户反馈）。
+     */
+    function modelLines(spent, t) {
+      if (!spent.models || spent.models.length === 0) return null
+      return h('div', null, spent.models.map(m => row(
+        shortModel(m.model),
+        m.priced ? usd(m.costUsd, spent.currency) + ' · ' + num(m.tokens) : t('notCounted') + ' · ' + num(m.tokens),
+      )))
+    }
+
     function usd(n, currency) {
       const sym = currency === 'CNY' ? '¥' : '$'
       if (n <= 0) return sym + '0'
@@ -183,7 +206,14 @@ window.__ModuleLoader__.load({
         // pill 在输入框右侧，'start' 会让面板向右铺开、看着像挂在别处。
         align: 'end',
         gap: 8,
-        margin: 8,
+        // 与宿主 stat-dialog 的 PANEL_MARGIN 一致，保证夹取行为相同。
+        margin: 12,
+        // 内容一变就重测：首帧是隐藏测量的，之后模型明细、未计价行都会改变高度。
+        // ★ 必须判空：spent 在这一行可能还是 null（下面的 return null 在钩子之后）。
+        layoutKey: spent === null ? 'none'
+          : String(spent.tokens) + ':' + String(spent.costUsd) + ':'
+            + String(spent.models ? spent.models.length : 0) + ':' + String(spent.unpricedModels ? spent.unpricedModels.length : 0)
+            + ':' + String(spent.unbilledTurns),
       })
       useDismissOnOutsidePointer(rootRef, open, setOpen)
 
@@ -231,6 +261,7 @@ window.__ModuleLoader__.load({
                 h('span', null, t('title')),
                 pct === null ? null : h('span', { style: NUM }, pct + '%')),
               h('div', { style: RULE }),
+              modelLines(spent, t),
               row(t('spent'), usd(spent.costUsd, spent.currency)),
               row(t('tokens'), num(spent.tokens)),
               budget === null || budget === undefined

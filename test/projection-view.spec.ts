@@ -117,6 +117,28 @@ function fold(def: ReturnType<typeof createGoalBudgetProjection>, events: Array<
   assert.ok(Math.abs(b - 4.353723) < 1e-5, `❌ 网关口径应按非高峰价：${b}`)
 }
 
+// ── 6e. ★ 分模型明细：让「哪部分算了钱、哪部分没算」一眼可见 ──
+//      OBSERVED 的用户反馈：面板只给总数，看不出 DeepSeek 那部分到底有没有计价。
+{
+  const def = createGoalBudgetProjection({ currency: () => 'USD' })
+  let s = def.init()
+  s = def.apply(s, { type: 'request/header', data: { header: { config: { provider: 'magpie-responses', model: 'cm-ais/deepseek-v4.1-flash' } } } })
+  s = def.apply(s, { type: 'assistant/message', time: bjTime(12), data: { turn: 1, usage } })
+  s = def.apply(s, { type: 'request/header', data: { header: { config: { provider: 'magpie-anthropic', model: 'cm-ais/claude-haiku-5-5' } } } })
+  s = def.apply(s, { type: 'assistant/message', time: bjTime(12), data: { turn: 2, usage: { inputTokens: 1_000_000, outputTokens: 0 } } })
+  const view = def.wire.view(s)
+  assert.equal(view.spent.models.length, 2, `❌ 应有两条模型明细：${JSON.stringify(view.spent.models)}`)
+  const ds = view.spent.models.find(m => m.model === 'deepseek-flash')
+  const haiku = view.spent.models.find(m => m.model.includes('claude-haiku-5-5'))
+  assert.ok(ds && ds.priced, '❌ DeepSeek 那条应计了价')
+  assert.ok(Math.abs((ds?.costUsd ?? 0) - 4.353723) < 1e-5, `❌ DeepSeek 明细金额应为 $4.3537：${ds?.costUsd}`)
+  assert.equal(ds?.tokens, 665_090_129, '❌ DeepSeek 明细的 token 应等于三桶之和')
+  assert.ok(haiku && haiku.priced === false, '❌ 未计价模型应标 priced=false')
+  assert.equal(haiku?.costUsd, 0, '❌ 未计价模型的费用必须为 0')
+  assert.equal(haiku?.tokens, 1_000_000, '❌ 未计价模型的 token 也要显示')
+  assert.doesNotThrow(() => def.wire.viewSchema.parse(view), '❌ 带明细的视图应通过 viewSchema')
+}
+
 // ── 7. 框架契约：不关心的事件必须返回同一个引用 ──
 {
   const def = createGoalBudgetProjection()
@@ -133,7 +155,8 @@ function fold(def: ReturnType<typeof createGoalBudgetProjection>, events: Array<
 // ── 9. 版本号：绑定官方日历的内容，日历变了旧缓存必须重建 ──
 {
   const def = createGoalBudgetProjection()
-  assert.equal(def.stateVersion, 6_000_000 + digestOf(OFF_DAYS.join(',')), '❌ 版本号应绑定日历内容')
+  // 基数 7_000_000：状态形状变过（unpriced 带 token 数、视图加分模型明细），改动形状必须再递增。
+assert.equal(def.stateVersion, 7_000_000 + digestOf(OFF_DAYS.join(',')), '❌ 版本号应绑定日历内容')
 }
 
 console.log('✅ projection-view.spec.ts 全部通过（9 组断言）')

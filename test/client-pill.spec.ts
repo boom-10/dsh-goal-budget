@@ -187,6 +187,9 @@ function clickPill(out: El | null): void {
 function textOf(node: unknown): string {
   if (node === null || node === undefined) return ''
   if (typeof node === 'string' || typeof node === 'number') return String(node)
+  // React 允许把数组当作子元素（例如 `h('div', null, items.map(...))`）。
+  // 替身必须同样支持，否则嵌套数组会被静默丢掉 —— 这正是分模型明细第一次没被断出来的原因。
+  if (Array.isArray(node)) return node.map(textOf).join(' ')
   const n = node as El
   if (n?.props === undefined) return ''
   const kids = n.props['children']
@@ -439,6 +442,33 @@ const view = (k: string) => (k === 'goalBudget' ? HOSTED : undefined)
   const text = textOf(panel)
   assert.match(text, /claude-sonnet/, `❌ 面板应列出未定价的模型：${text}`)
   assert.match(text, /cost is not counted/, `❌ 应说明费用没有计入：${text}`)
+}
+
+// ── 14. 分模型明细：DeepSeek 显示金额，未计价的模型显示「not counted」+ token ──
+{
+  remount()
+  activeLocale = 'en'
+  const breakdownView = {
+    budget: null,
+    spent: {
+      tokens: 537_632_218, costUsd: 3.1806, currency: 'USD', unbilledTurns: 0,
+      unpricedModels: ['magpie-anthropic/cm-ais/claude-haiku-5-5'],
+      models: [
+        { model: 'deepseek-flash', tokens: 466_228_405, costUsd: 3.1806, priced: true },
+        { model: 'magpie-anthropic/cm-ais/claude-haiku-5-5', tokens: 72_403_813, costUsd: 0, priced: false },
+      ],
+    },
+  }
+  const useBreakdown = (k: string) => (k === 'goalBudget' ? breakdownView : undefined)
+  clickPill(render(Pill, { useProjection: useBreakdown }) as El)
+  const opened = render(Pill, { useProjection: useBreakdown }) as El
+  const panel = findEl(opened, n => n.props['role'] === 'dialog')
+  assert.ok(panel, '❌ 找不到面板')
+  const text = textOf(panel)
+  assert.match(text, /deepseek-flash/, `❌ 明细应显示模型名：${text}`)
+  assert.match(text, /\$3\.18/, `❌ 明细应显示该模型的金额：${text}`)
+  assert.match(text, /not counted/, `❌ 未计价的模型应标明未计入：${text}`)
+  assert.match(text, /466\.23m|466\.2m/, `❌ 应显示该模型的 token：${text}`)
 }
 
 console.log('✅ client-pill.spec.ts 全部通过（13 组断言）')

@@ -298,6 +298,7 @@ block(agent: Agent, ref: GoalRef, reason: GoalBlockReason): GoalView
 - **网关前缀自动去掉。** 模型 id 形如 `cm-ais/deepseek-v4.1-flash` 时，会先去掉 `供应商/` 前缀再匹配内置价目；改名过的模型用 `modelAliases` 映射一条即可，不必等插件发版。
 - **旧模型名按官方说明折叠。** `deepseek-v4-flash` 与 `deepseek-v4-flash-vision-exp` 按 Flash 价格计费。
 - **不计价的模型不猜。** 目前只支持 DeepSeek；其它模型的 token 照常计入，费用不计，并在面板里列出它的名字。
+- **面板按模型分列明细**：每个模型各占多少 token、算了多少钱（或标为「未计价」），一眼能看出哪部分没计入。
 - **没有汇率。** 费用按账户币种直接算，预算也按账户币种设：美元账户用 `/budget $5`，人民币账户用 `/budget ¥30`。币种不符的费用上限会被拒绝。
 
 ### 用真实会话日志回放验证

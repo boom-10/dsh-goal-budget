@@ -20,7 +20,15 @@ export interface GoalBudgetView {
     readonly costUsd: number
     readonly currency: Currency | null
     readonly unbilledTurns: number
+    /** 不能计价的模型名（`provider/model`）。 */
     readonly unpricedModels: readonly string[]
+    /** 分模型明细：让「哪部分算了钱、哪部分没算」一眼可见。 */
+    readonly models: readonly {
+      readonly model: string
+      readonly tokens: number
+      readonly costUsd: number
+      readonly priced: boolean
+    }[]
   }
 }
 
@@ -40,7 +48,8 @@ export interface GoalBudgetState {
   readonly route: { readonly provider: string | undefined; readonly model: string | undefined } | null
   readonly tokens: number
   readonly unbilledTurns: number
-  readonly unpricedModels: readonly string[]
+  /** 不能计价的（模型名, token 数）；token 计入总量，费用不计。 */
+  readonly unpriced: readonly { readonly key: string; readonly tokens: number }[]
   readonly buckets: readonly Bucket[]
 }
 
@@ -64,7 +73,7 @@ const stateSchema = z.object({
   route: z.nullable(routeSchema),
   tokens: z.number().nonnegative(),
   unbilledTurns: z.number().int().nonnegative(),
-  unpricedModels: z.array(z.string()),
+  unpriced: z.array(z.object({ key: z.string(), tokens: z.number().nonnegative() }).strict()),
   buckets: z.array(bucketSchema),
 }).strict()
 const viewSchema = z.object({
@@ -75,13 +84,25 @@ const viewSchema = z.object({
     currency: z.nullable(currencySchema),
     unbilledTurns: z.number().int().nonnegative(),
     unpricedModels: z.array(z.string()),
+    models: z.array(z.object({
+      model: z.string(),
+      tokens: z.number().nonnegative(),
+      costUsd: z.number().nonnegative(),
+      priced: z.boolean(),
+    }).strict()),
   }).strict(),
 }).strict()
 
-const EMPTY: GoalBudgetState = { budget: null, route: null, tokens: 0, unbilledTurns: 0, unpricedModels: [], buckets: [] }
+const EMPTY: GoalBudgetState = { budget: null, route: null, tokens: 0, unbilledTurns: 0, unpriced: [], buckets: [] }
 
-function addUnpriced(list: readonly string[], key: string): readonly string[] {
-  return list.includes(key) ? list : [...list, key].sort()
+/** 累加某个不计价模型的 token 数；按键排序，同一份日志得到同一个数组。 */
+function addUnpriced(
+  list: readonly { key: string; tokens: number }[],
+  key: string,
+  tokens: number,
+): readonly { key: string; tokens: number }[] {
+  if (!list.some(u => u.key === key)) return [...list, { key, tokens }].sort((a, b) => (a.key < b.key ? -1 : 1))
+  return list.map(u => (u.key === key ? { key: u.key, tokens: u.tokens + tokens } : u))
 }
 
 function routeKey(route: GoalBudgetState['route']): string {
@@ -111,14 +132,19 @@ function addToBucket(buckets: readonly Bucket[], add: Bucket): readonly Bucket[]
 /** 由状态与当前币种算出客户端视图。币种未知时费用为 0，但 token 与不计价模型照常显示。 */
 function viewOf(state: GoalBudgetState, currency: Currency | undefined): GoalBudgetView {
   let costUsd = 0
-  if (currency !== undefined) {
-    for (const b of state.buckets) {
-      costUsd += costOfTariff(
-        { inputTokens: b.uncached, cacheReadTokens: b.cacheRead, cacheWriteTokens: b.cacheWrite, outputTokens: b.output },
-        ratesFor(b.model, currency, b.band),
-      )
-    }
+  const perModel = new Map<string, { tokens: number; costUsd: number; priced: boolean }>()
+  for (const b of state.buckets) {
+    const cost = currency === undefined
+      ? 0
+      : costOfTariff(
+          { inputTokens: b.uncached, cacheReadTokens: b.cacheRead, cacheWriteTokens: b.cacheWrite, outputTokens: b.output },
+          ratesFor(b.model, currency, b.band),
+        )
+    costUsd += cost
+    const line = perModel.get(b.model) ?? { tokens: 0, costUsd: 0, priced: true }
+    perModel.set(b.model, { tokens: line.tokens + b.uncached + b.cacheRead + b.cacheWrite + b.output, costUsd: line.costUsd + cost, priced: true })
   }
+  for (const u of state.unpriced) perModel.set(u.key, { tokens: u.tokens, costUsd: 0, priced: false })
   return {
     budget: state.budget,
     spent: {
@@ -126,7 +152,10 @@ function viewOf(state: GoalBudgetState, currency: Currency | undefined): GoalBud
       costUsd,
       currency: currency ?? null,
       unbilledTurns: state.unbilledTurns,
-      unpricedModels: [...state.unpricedModels],
+      unpricedModels: state.unpriced.map(u => u.key),
+      models: [...perModel.entries()]
+        .map(([model, line]) => ({ model, ...line }))
+        .sort((a, b) => b.costUsd - a.costUsd || (a.model < b.model ? -1 : 1)),
     },
   }
 }
@@ -198,7 +227,7 @@ export function createGoalBudgetProjection(options: {
         const model = canonicalDeepSeekModel(state.route?.model, aliases)
         if (model === undefined) {
           // 不是可计价的模型：token 计入，费用不计，并列出模型名。不用别的模型的价格去猜。
-          return { ...state, tokens, unpricedModels: addUnpriced(state.unpricedModels, routeKey(state.route)) }
+          return { ...state, tokens, unpriced: addUnpriced(state.unpriced, routeKey(state.route), billedTokensOf(usage)) }
         }
         return {
           ...state,
@@ -224,7 +253,8 @@ export function createGoalBudgetProjection(options: {
     },
 
     /** 官方日历的内容参与版本号：日历变了，持久化的旧状态（峰谷已按旧日历分桶）必须重建。 */
-    stateVersion: 6_000_000 + digestOf(OFF_DAYS.join(',')),
+    // 7_000_000：状态形状变了（unpriced 带 token 数、视图加分模型明细），旧缓存必须重建。
+    stateVersion: 7_000_000 + digestOf(OFF_DAYS.join(',')),
   } as const
 }
 

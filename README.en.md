@@ -285,6 +285,7 @@ A cache hit costs about 1/50 of an uncached input token (off-peak: $0.003 agains
 - **A gateway prefix is stripped automatically.** A model id like `cm-ais/deepseek-v4.1-flash` matches the built-in tariff after the `vendor/` prefix is removed; a renamed model needs one `modelAliases` line rather than a plugin release.
 - **Legacy model names fold to their current price.** `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` are billed at the Flash price, as the official page states.
 - **A model without a price is not guessed.** Only DeepSeek is priced for now. Other models' tokens are counted, their cost is not, and the panel lists their names.
+- **The panel breaks the total down per model**: tokens and cost for each, or "not counted", so it is visible which share is missing.
 - **No exchange rate.** Costs are computed in the account's currency and budgets are set in it: `/budget $5` for a USD account, `/budget ¥30` for a CNY account. A cost cap in the wrong currency is rejected.
 
 ### Verifying against a real session log
