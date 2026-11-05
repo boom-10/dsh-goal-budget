@@ -89,9 +89,9 @@ const weekdayOf = (y: number, mo: number, d: number) => new Date(Date.UTC(y, mo 
 
 // ── 5. 官方价目：峰值 = 空闲价的 2 倍（官方脚注），数值与官方页面一致 ──
 {
-  assert.deepEqual(ratesFor('deepseek-flash', 'CNY', 'offPeak'), { cacheHit: 0.02, cacheMiss: 1, output: 4 })
-  assert.deepEqual(ratesFor('deepseek-flash', 'USD', 'peak'), { cacheHit: 0.006, cacheMiss: 0.3, output: 1.2 })
-  assert.deepEqual(ratesFor('deepseek-v4-pro', 'CNY', 'peak'), { cacheHit: 0.3, cacheMiss: 9, output: 27 })
+  assert.deepEqual(ratesFor('deepseek-flash', 'CNY', 'offPeak', []), { cacheHit: 0.02, cacheMiss: 1, cacheWrite: 1, output: 4 })
+  assert.deepEqual(ratesFor('deepseek-flash', 'USD', 'peak', []), { cacheHit: 0.006, cacheMiss: 0.3, cacheWrite: 0.3, output: 1.2 })
+  assert.deepEqual(ratesFor('deepseek-v4-pro', 'CNY', 'peak', []), { cacheHit: 0.3, cacheMiss: 9, cacheWrite: 9, output: 27 })
   for (const currency of ['USD', 'CNY'] as const) {
     for (const model of ['deepseek-flash', 'deepseek-v4-pro'] as const) {
       const off = DEEPSEEK_TARIFFS[currency][model].offPeak
@@ -106,12 +106,12 @@ const weekdayOf = (y: number, mo: number, d: number) => new Date(Date.UTC(y, mo 
 // ── 6. ★ 真实会话 2d3becaf 的合计（未命中 13,150,225；缓存命中 651,227,392；输出 712,512）──
 {
   const u = { inputTokens: 13_150_225, cacheReadTokens: 651_227_392, cacheWriteTokens: 0, outputTokens: 712_512 }
-  const usd = costOfTariff(u, ratesFor('deepseek-flash', 'USD', 'offPeak'))
+  const usd = costOfTariff(u, ratesFor('deepseek-flash', 'USD', 'offPeak', [])!)
   assert.ok(Math.abs(usd - 4.353723126) < 1e-9, `❌ 美元非高峰应为 $4.3537，得到 ${usd}`)
   // 手算：13.150225 × 1 + 651.227392 × 0.02 + 0.712512 × 4 = 29.02482084 元
-  const cny = costOfTariff(u, ratesFor('deepseek-flash', 'CNY', 'offPeak'))
+  const cny = costOfTariff(u, ratesFor('deepseek-flash', 'CNY', 'offPeak', [])!)
   assert.ok(Math.abs(cny - 29.02482084) < 1e-6, `❌ 人民币非高峰应为 ¥29.0248，得到 ${cny}`)
-  const cnyPeak = costOfTariff(u, ratesFor('deepseek-flash', 'CNY', 'peak'))
+  const cnyPeak = costOfTariff(u, ratesFor('deepseek-flash', 'CNY', 'peak', [])!)
   assert.ok(Math.abs(cnyPeak - 2 * 29.02482084) < 1e-6, '❌ 人民币高峰应为空闲的 2 倍')
 }
 

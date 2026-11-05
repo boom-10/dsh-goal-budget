@@ -20,6 +20,42 @@ export type Band = 'peak' | 'offPeak'
 /** 计价支持的 DeepSeek 模型（旧名已折叠到这里）。 */
 export type CanonicalModel = 'deepseek-flash' | 'deepseek-v4-pro'
 
+/**
+ * 一个模型的四桶单价，每百万 token。
+ *
+ * `cacheWrite` 单列：DeepSeek 不单独收缓存写入费（用未命中价），而 Anthropic 等供应商有自己的写入价。
+ */
+export interface ModelRates {
+  readonly cacheMiss: number
+  readonly cacheHit: number
+  readonly cacheWrite: number
+  readonly output: number
+}
+
+/**
+ * 用户配置的模型单价 —— 用于 DeepSeek 之外的模型（本项目只内置官方 DeepSeek 价目）。
+ *
+ * 单价的可靠来源是**供应商自己的账单**：见 `scripts/calibrate-prices.py`，
+ * 它从网关的逐条计费记录反解出这四个数，并用残差验证。
+ */
+export interface ConfiguredPrice {
+  readonly model: string
+  readonly currency: Currency
+  readonly inputPerMillion: number
+  readonly cacheReadPerMillion: number
+  readonly cacheWritePerMillion: number
+  readonly outputPerMillion: number
+  /**
+   * 该单价是**估算**而非已核实的精确值。
+   *
+   * 为什么需要它：供应商对同一次调用的收费可能按请求不同。实测某网关的同一模型、
+   * 同一上游凭据下，绝大多数请求与标准价精确一致（比值 1.000），但有一部分恰好按 1/5 计费
+   * （比值 0.200，路由命中了更便宜的上游）。会话日志里看不到这个维度，
+   * 所以这类模型的金额必须标成估算，不能与逐条核实过的 DeepSeek 价目混为一谈。
+   */
+  readonly estimated?: boolean
+}
+
 /** 一个时段的三项单价，每百万 token。 */
 export interface Rates {
   readonly cacheHit: number
@@ -150,6 +186,58 @@ export function bandAt(at: number): Band {
  * 全部落在高峰时段，而其收费与非高峰价**逐条精确吻合**（总绝对误差 0），
  * 按 2 倍算则整体翻倍。所以网关线路必须关掉峰谷，否则高峰时段高估一倍。
  */
+/**
+ * 模型名归一化：去掉网关的供应商前缀、忽略大小写。别名表与配置单价表都用它匹配。
+ */
+export function normalizeModelName(id: string): string {
+  return lastSegment(id.trim()).toLowerCase()
+}
+
+/** 配置里是否有这个模型的单价；返回配置条目的名字（作为计价键），否则 undefined。 */
+export function configuredPriceKey(id: string | undefined, prices: readonly ConfiguredPrice[]): string | undefined {
+  if (id === undefined || id.length === 0) return undefined
+  const want = normalizeModelName(id)
+  return prices.find(p => normalizeModelName(p.model) === want)?.model
+}
+
+/**
+ * 模型名 → 计价键。先查内置的官方 DeepSeek 价目，再查配置的单价表。
+ * 都不认识时返回 undefined —— 调用方不得用别的模型的价格顶替（失败模式 #2）。
+ */
+export function resolvePriceKey(
+  id: string | undefined,
+  aliases: ModelAliases,
+  prices: readonly ConfiguredPrice[],
+): string | undefined {
+  return canonicalDeepSeekModel(id, aliases) ?? configuredPriceKey(id, prices)
+}
+
+/**
+ * 计价键 + 币种 + 时段 → 四桶单价。
+ *
+ * 内置的官方 DeepSeek 价目分峰谷；配置的单价按固定值计（供应商若分时计价，用 peakMultiplier 的
+ * 思路应扩展成多档，目前按账单实测的固定价处理）。
+ */
+export function ratesFor(
+  key: string,
+  currency: Currency,
+  band: Band,
+  prices: readonly ConfiguredPrice[],
+): ModelRates | undefined {
+  if (key === 'deepseek-flash' || key === 'deepseek-v4-pro') {
+    const r = DEEPSEEK_TARIFFS[currency][key][band]
+    return { cacheMiss: r.cacheMiss, cacheHit: r.cacheHit, cacheWrite: r.cacheMiss, output: r.output }
+  }
+  const entry = prices.find(p => p.model === key)
+  if (entry === undefined || entry.currency !== currency) return undefined
+  return {
+    cacheMiss: entry.inputPerMillion,
+    cacheHit: entry.cacheReadPerMillion,
+    cacheWrite: entry.cacheWritePerMillion,
+    output: entry.outputPerMillion,
+  }
+}
+
 export function bandFor(at: number, peakPricing: boolean): Band {
   return peakPricing ? bandAt(at) : 'offPeak'
 }
@@ -157,11 +245,6 @@ export function bandFor(at: number, peakPricing: boolean): Band {
 /** 节假日日历是否覆盖这一时刻所在的年份。不覆盖时假期判断退回星期规则，结果不保证准确。 */
 export function calendarCovers(at: number): boolean {
   return COVERED_YEARS.includes(beijingClock(at).year)
-}
-
-/** 某模型、币种、时段的单价。 */
-export function ratesFor(model: CanonicalModel, currency: Currency, band: Band): Rates {
-  return DEEPSEEK_TARIFFS[currency][model][band]
 }
 
 /** 一次用量的 token 桶（输入未命中缓存、缓存命中、缓存写入、输出含推理）。 */
@@ -177,8 +260,8 @@ export interface PricedUsage {
  *
  * 三个输入桶并列；缓存写入 DeepSeek 不单独收费，按未命中价计；推理 token 已含在输出里，不重复加。
  */
-export function costOfTariff(u: PricedUsage, r: Rates): number {
-  return ((u.inputTokens + u.cacheWriteTokens) * r.cacheMiss + u.cacheReadTokens * r.cacheHit + u.outputTokens * r.output) / 1_000_000
+export function costOfTariff(u: PricedUsage, r: ModelRates): number {
+  return (u.inputTokens * r.cacheMiss + u.cacheReadTokens * r.cacheHit + u.cacheWriteTokens * r.cacheWrite + u.outputTokens * r.output) / 1_000_000
 }
 
 /** 文本的稳定摘要（FNV-1a，0 到 999999），用于投影缓存版本。 */

@@ -58,6 +58,7 @@ window.__ModuleLoader__.load({
         noCapHint: '用 /budget $5 或 /budget 500k 设置',
         unbilled: '{count} 轮未上报 token 用量，未计入',
         provenance: '由宿主计价，与预算判定同一套算法',
+        estimatedNote: '≈ 为估算：该模型的单价由账单核对/反解而来，供应商可能对部分请求按不同价格计费（实测有按 1/5 计费的请求）',
         notCounted: '未计价',
         unpriced: '未计价：{models}（费用未计入，请在价格表里配置）',
         currencyUnknown: '账户币种未识别，费用暂不计入；请在配置里设置 currency（USD 或 CNY）',
@@ -76,6 +77,7 @@ window.__ModuleLoader__.load({
         noCapHint: 'Set one with /budget $5 or /budget 500k',
         unbilled: '{count} turn(s) reported no token usage and are not counted',
         provenance: 'Priced by the host with the same math the budget gate uses',
+        estimatedNote: '≈ marks an estimate: this model\'s rates come from reconciling the provider bill, and the provider may charge some requests differently (requests billed at 1/5 of the standard rate were measured)',
         notCounted: 'not counted',
         unpriced: 'No price for {models}; its cost is not counted (add it to the price table)',
         currencyUnknown: 'Account currency not detected yet; cost is not counted. Set currency (USD or CNY) in the config.',
@@ -124,6 +126,16 @@ window.__ModuleLoader__.load({
     const DIM = { opacity: 0.7 }
     const NOTE = { marginTop: '10px', fontSize: '11px', lineHeight: '16px', opacity: 0.7 }
 
+    /**
+     * 估算说明：某些模型的单价是按账单反解/核对的**估算** —— 供应商对同一次调用可能按请求
+     * 不同收费（实测有请求按标准价的 1/5 计费），而会话日志里看不到这个维度。
+     * 标出来，比给一个看起来精确的数字更诚实。
+     */
+    function estimatedLine(spent, t) {
+      const anyEstimated = spent.models && spent.models.some(m => m.priced && m.estimated)
+      return anyEstimated ? h('div', { style: NOTE }, t('estimatedNote')) : null
+    }
+
     /** 金额按币种显示：人民币为 ¥，其余（含未指定）为 $。 */
     /** 模型名太长，只显示最后一段（与计价用的归一化规则一致）。 */
     function shortModel(name) {
@@ -140,7 +152,9 @@ window.__ModuleLoader__.load({
       if (!spent.models || spent.models.length === 0) return null
       return h('div', null, spent.models.map(m => row(
         shortModel(m.model),
-        m.priced ? usd(m.costUsd, spent.currency) + ' · ' + num(m.tokens) : t('notCounted') + ' · ' + num(m.tokens),
+        m.priced
+          ? (m.estimated ? '≈' : '') + usd(m.costUsd, spent.currency) + ' · ' + num(m.tokens)
+          : t('notCounted') + ' · ' + num(m.tokens),
       )))
     }
 
@@ -276,6 +290,7 @@ window.__ModuleLoader__.load({
                 : null,
               h('div', { style: NOTE }, t('provenance')),
               unpricedLine(spent, t),
+              estimatedLine(spent, t),
             ),
             document.body,
           )

@@ -9,7 +9,7 @@ import { z } from 'zod'
 import { billedTokensOf, type TokenUsage } from './accounting.ts'
 import { parseBudgetCommand } from './budget-command.ts'
 import { OFF_DAYS } from './holiday-calendar.ts'
-import { bandFor, canonicalDeepSeekModel, costOfTariff, digestOf, ratesFor, type Band, type CanonicalModel, type Currency, type ModelAliases } from './tariff.ts'
+import { bandFor, costOfTariff, digestOf, ratesFor, resolvePriceKey, type Band, type ConfiguredPrice, type Currency, type ModelAliases } from './tariff.ts'
 
 /** 客户端读到的形状。 */
 export interface GoalBudgetView {
@@ -28,13 +28,16 @@ export interface GoalBudgetView {
       readonly tokens: number
       readonly costUsd: number
       readonly priced: boolean
+      /** 金额是估算（供应商按请求变价），面板用 ≈ 标出。 */
+      readonly estimated: boolean
     }[]
   }
 }
 
 /** 一个（模型, 峰谷时段）的 token 桶。 */
 export interface Bucket {
-  readonly model: CanonicalModel
+  /** 计价键：内置 DeepSeek 名，或配置单价表里的模型名。 */
+  readonly model: string
   readonly band: Band
   readonly uncached: number
   readonly cacheRead: number
@@ -60,7 +63,7 @@ const budgetSchema = z.object({
   costCurrency: z.nullable(currencySchema),
 }).strict()
 const bucketSchema = z.object({
-  model: z.enum(['deepseek-flash', 'deepseek-v4-pro']),
+  model: z.string(),
   band: z.enum(['peak', 'offPeak']),
   uncached: z.number().nonnegative(),
   cacheRead: z.number().nonnegative(),
@@ -89,6 +92,7 @@ const viewSchema = z.object({
       tokens: z.number().nonnegative(),
       costUsd: z.number().nonnegative(),
       priced: z.boolean(),
+      estimated: z.boolean(),
     }).strict()),
   }).strict(),
 }).strict()
@@ -130,21 +134,37 @@ function addToBucket(buckets: readonly Bucket[], add: Bucket): readonly Bucket[]
 }
 
 /** 由状态与当前币种算出客户端视图。币种未知时费用为 0，但 token 与不计价模型照常显示。 */
-function viewOf(state: GoalBudgetState, currency: Currency | undefined): GoalBudgetView {
+function viewOf(state: GoalBudgetState, currency: Currency | undefined, prices: readonly ConfiguredPrice[]): GoalBudgetView {
   let costUsd = 0
-  const perModel = new Map<string, { tokens: number; costUsd: number; priced: boolean }>()
+  const perModel = new Map<string, { tokens: number; costUsd: number; priced: boolean; estimated: boolean }>()
   for (const b of state.buckets) {
     const cost = currency === undefined
       ? 0
-      : costOfTariff(
-          { inputTokens: b.uncached, cacheReadTokens: b.cacheRead, cacheWriteTokens: b.cacheWrite, outputTokens: b.output },
-          ratesFor(b.model, currency, b.band),
-        )
+      : (() => {
+          const r = ratesFor(b.model, currency, b.band, prices)
+          return r === undefined ? 0 : costOfTariff(
+            { inputTokens: b.uncached, cacheReadTokens: b.cacheRead, cacheWriteTokens: b.cacheWrite, outputTokens: b.output },
+            r,
+          )
+        })()
     costUsd += cost
-    const line = perModel.get(b.model) ?? { tokens: 0, costUsd: 0, priced: true }
-    perModel.set(b.model, { tokens: line.tokens + b.uncached + b.cacheRead + b.cacheWrite + b.output, costUsd: line.costUsd + cost, priced: true })
+    const estimated = prices.find(x => x.model === b.model)?.estimated === true
+    const line = perModel.get(b.model) ?? { tokens: 0, costUsd: 0, priced: true, estimated }
+    perModel.set(b.model, {
+      tokens: line.tokens + b.uncached + b.cacheRead + b.cacheWrite + b.output,
+      costUsd: line.costUsd + cost,
+      priced: true,
+      estimated: line.estimated || estimated,
+    })
   }
-  for (const u of state.unpriced) perModel.set(u.key, { tokens: u.tokens, costUsd: 0, priced: false })
+  for (const u of state.unpriced) perModel.set(u.key, { tokens: u.tokens, costUsd: 0, priced: false, estimated: false })
+  // 有桶但按当前币种查不到单价的（例如配置里只有 USD 价、账户是 CNY）：标为未计价，金额留 0。
+  for (const [model, line] of perModel) {
+    if (line.priced && currency !== undefined && ratesFor(model, currency, 'offPeak', prices) === undefined
+      && model !== 'deepseek-flash' && model !== 'deepseek-v4-pro') {
+      perModel.set(model, { tokens: line.tokens, costUsd: 0, priced: false, estimated: false })
+    }
+  }
   return {
     budget: state.budget,
     spent: {
@@ -172,10 +192,13 @@ export function createGoalBudgetProjection(options: {
   readonly aliases?: ModelAliases
   /** 是否按官方峰谷时段计价；网关线路为 false（见 bandFor 的实测依据）。 */
   readonly peakPricing?: boolean
+  /** 配置的模型单价（DeepSeek 之外的模型）。 */
+  readonly prices?: readonly ConfiguredPrice[]
 } = {}) {
   const getCurrency = options.currency ?? (() => undefined)
   const aliases = options.aliases ?? {}
   const peakPricing = options.peakPricing ?? true
+  const prices = options.prices ?? []
   return {
     key: 'goalBudget',
     stateSchema,
@@ -224,7 +247,7 @@ export function createGoalBudgetProjection(options: {
           return { ...state, unbilledTurns: state.unbilledTurns + 1 }
         }
         const tokens = state.tokens + billedTokensOf(usage)
-        const model = canonicalDeepSeekModel(state.route?.model, aliases)
+        const model = resolvePriceKey(state.route?.model, aliases, prices)
         if (model === undefined) {
           // 不是可计价的模型：token 计入，费用不计，并列出模型名。不用别的模型的价格去猜。
           return { ...state, tokens, unpriced: addUnpriced(state.unpriced, routeKey(state.route), billedTokensOf(usage)) }
@@ -234,7 +257,8 @@ export function createGoalBudgetProjection(options: {
           tokens,
           buckets: addToBucket(state.buckets, {
             model,
-            band: bandFor(event.time ?? 0, peakPricing),
+            // 内置 DeepSeek 价目分峰谷；配置的单价是固定值（账单实测所得），一律记非高峰桶。
+            band: model === 'deepseek-flash' || model === 'deepseek-v4-pro' ? bandFor(event.time ?? 0, peakPricing) : 'offPeak',
             uncached: usage.inputTokens,
             cacheRead: usage.cacheReadTokens ?? 0,
             cacheWrite: usage.cacheWriteTokens ?? 0,
@@ -249,7 +273,7 @@ export function createGoalBudgetProjection(options: {
     /** 客户端视图：金额按当前币种计算，路由与桶不送出。 */
     wire: {
       viewSchema,
-      view: (state: GoalBudgetState): GoalBudgetView => viewOf(state, getCurrency()),
+      view: (state: GoalBudgetState): GoalBudgetView => viewOf(state, getCurrency(), prices),
     },
 
     /** 官方日历的内容参与版本号：日历变了，持久化的旧状态（峰谷已按旧日历分桶）必须重建。 */

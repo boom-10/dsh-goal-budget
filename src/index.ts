@@ -21,7 +21,7 @@ import {
   type GoalSpend, type Pricing, type TurnSpend,
 } from './accounting.ts'
 import { detectAccountCurrency, type CredentialsService } from './currency-detect.ts'
-import { bandFor, calendarCovers, canonicalDeepSeekModel, ratesFor, type Band, type CanonicalModel, type Currency, type ModelAliases } from './tariff.ts'
+import { bandFor, calendarCovers, ratesFor, resolvePriceKey, type Band, type ConfiguredPrice, type Currency, type ModelAliases } from './tariff.ts'
 import {
   describeBudget, formatDuration, formatTokens, formatUsd, isUnlimited,
   parseBudgetCommand, renderBudget, type Budget,
@@ -64,6 +64,27 @@ export const Config = z.object({
    * 收费却与非高峰价逐条精确吻合（见 README「用网关账单校准」）。设错会让高峰时段高估一倍。
    */
   peakPricing: z.boolean().default(true),
+  /**
+   * DeepSeek 之外的模型单价。本项目只内置官方 DeepSeek 价目，其它模型在这里配置。
+   *
+   * 可靠来源是**供应商自己的账单**：`scripts/calibrate-prices.py` 从网关的逐条计费记录
+   * 反解出这四个单价并用残差验证（实测：gpt-6.1-sol 精确解得 2 / 0.1 / 10）。
+   * 只配了某个币种时，其它币种的账户会把该模型标为未计价，而不是拿别的币种的价去顶。
+   */
+  modelPrices: z
+    .array(
+      z.object({
+        model: z.string(),
+        currency: z.union([z.const('USD'), z.const('CNY')]),
+        inputPerMillion: z.number(),
+        cacheReadPerMillion: z.number(),
+        cacheWritePerMillion: z.number(),
+        outputPerMillion: z.number(),
+        /** 该单价是估算（供应商按请求变价）时设 true，面板会用 ≈ 标出。 */
+        estimated: z.boolean().default(false),
+      }),
+    )
+    .default([]),
   /** 超预算时的动作。`block` 会调 ctx.goals.block() 并自动 disarm。 */
   onExceed: z.union([z.const('block'), z.const('warn')]).default('block'),
   /** 达到该比例时注入一次提醒（0–1）。0 = 不提醒。 */
@@ -77,6 +98,7 @@ export interface GoalBudgetConfig {
   deepseekCredentialRef: string
   modelAliases: ModelAliases
   peakPricing: boolean
+  modelPrices: readonly ConfiguredPrice[]
   onExceed: 'block' | 'warn'
   warnAtRatio: number
 }
@@ -239,7 +261,7 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
    */
   // 单价与宿主 Config 同源 —— 客户端显示的数就是阻断判定用的数。
   let projection: ProjectionHandle | undefined
-  void Promise.resolve(ctx.sessionProjections.register(createGoalBudgetProjection({ currency: () => currency, aliases: config.modelAliases, peakPricing: config.peakPricing }))).then(
+  void Promise.resolve(ctx.sessionProjections.register(createGoalBudgetProjection({ currency: () => currency, aliases: config.modelAliases, peakPricing: config.peakPricing, prices: config.modelPrices }))).then(
     (handle) => {
       projection = handle
     },
@@ -419,10 +441,10 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
       // 这里补开这一轮，否则 startedAt 会一直是 undefined，时长恒为 0。
       const opened = at === undefined ? prev : openRound(prev, at)
       const route = routeOf(session)
-      const model = canonicalDeepSeekModel(route?.model, config.modelAliases)
+      const model = resolvePriceKey(route?.model, config.modelAliases, config.modelPrices)
       const pricing = model === undefined || currency === undefined || at === undefined
         ? undefined
-        : pricingOf(model, currency, bandFor(at, config.peakPricing))
+        : pricingOf(model, currency, model === 'deepseek-flash' || model === 'deepseek-v4-pro' ? bandFor(at, config.peakPricing) : 'offPeak', config.modelPrices)
       if (pricing === undefined) spend.unpricedTurns = (spend.unpricedTurns ?? 0) + 1
       const next = addUsage(opened, data?.usage, pricing ?? UNPRICED, at)
       spend.rounds.set(own.round, next)
@@ -443,9 +465,16 @@ function costInCurrency(b: Budget, currency: Currency | undefined): Budget {
   return currency !== undefined && b.costCurrency === currency ? b : { ...b, costUsd: 0 }
 }
 
-/** 官方价目 → addUsage 的单价形状（输入未命中、缓存命中、输出）。 */
-function pricingOf(model: CanonicalModel, currency: Currency, band: Band): Pricing {
-  const r = ratesFor(model, currency, band)
+/**
+ * 计价键 → addUsage 的单价形状。
+ *
+ * 现有会计层是三桶（未命中 / 缓存命中 / 输出），四桶由调用方在此折算：
+ * 缓存写入按未命中价并入输入（DeepSeek 不单独收写入费；配置型模型若写入价不同，
+ * 需要会计层也扩成四桶 —— 目前账单实测的模型写入量都很小，先按未命中价处理）。
+ */
+function pricingOf(key: string, currency: Currency, band: Band, prices: readonly ConfiguredPrice[]): Pricing | undefined {
+  const r = ratesFor(key, currency, band, prices)
+  if (r === undefined) return undefined
   return { inputPerMillion: r.cacheMiss, outputPerMillion: r.output, cacheReadPerMillion: r.cacheHit }
 }
 

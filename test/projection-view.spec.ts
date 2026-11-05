@@ -3,6 +3,7 @@
  */
 import assert from 'node:assert/strict'
 import { createGoalBudgetProjection } from '../src/budget-projection.ts'
+import type { ConfiguredPrice } from '../src/tariff.ts'
 import { digestOf } from '../src/tariff.ts'
 import { OFF_DAYS } from '../src/holiday-calendar.ts'
 
@@ -137,6 +138,59 @@ function fold(def: ReturnType<typeof createGoalBudgetProjection>, events: Array<
   assert.equal(haiku?.costUsd, 0, '❌ 未计价模型的费用必须为 0')
   assert.equal(haiku?.tokens, 1_000_000, '❌ 未计价模型的 token 也要显示')
   assert.doesNotThrow(() => def.wire.viewSchema.parse(view), '❌ 带明细的视图应通过 viewSchema')
+}
+
+// ── 6f. ★ 配置的模型单价：DeepSeek 之外的模型也能计价（单价来自账单反解，见 scripts/calibrate-prices.py）──
+{
+  const prices: ConfiguredPrice[] = [{
+    model: 'gpt-6.1-sol', currency: 'USD',
+    inputPerMillion: 2, cacheReadPerMillion: 0.1, cacheWritePerMillion: 2, outputPerMillion: 10,
+  }]
+  const def = createGoalBudgetProjection({ currency: () => 'USD', prices })
+  const s = fold(def, [
+    { type: 'request/header', data: { header: { config: { provider: 'magpie-responses', model: 'cm-ais/gpt-6.1-sol' } } } },
+    { type: 'assistant/message', time: bjTime(12), data: { turn: 1, usage: { inputTokens: 1_000_000, cacheReadTokens: 1_000_000, outputTokens: 100_000 } } },
+  ])
+  const view = def.wire.view(s)
+  // 1e6×2 + 1e6×0.1 + 0.1e6×10 = 2 + 0.1 + 1 = 3.1
+  assert.ok(Math.abs(view.spent.costUsd - 3.1) < 1e-9, `❌ 配置单价的模型应算出 $3.1，得到 ${view.spent.costUsd}`)
+  const line = view.spent.models.find(m => m.model === 'gpt-6.1-sol')
+  assert.ok(line?.priced, '❌ 应列为已计价')
+  assert.equal(line?.estimated, false, '❌ 未标 estimated 的应为精确值')
+  assert.doesNotThrow(() => def.wire.viewSchema.parse(view), '❌ 带明细的视图应通过 viewSchema')
+}
+
+// ── 6g. ★ 估算标记：供应商按请求变价时，金额必须标为估算 ──
+{
+  const prices: ConfiguredPrice[] = [{
+    model: 'claude-haiku-5-5', currency: 'USD',
+    inputPerMillion: 0.5, cacheReadPerMillion: 0.05, cacheWritePerMillion: 0.625, outputPerMillion: 2.5,
+    estimated: true,
+  }]
+  const def = createGoalBudgetProjection({ currency: () => 'USD', prices })
+  const s = fold(def, [
+    { type: 'request/header', data: { header: { config: { provider: 'magpie-anthropic', model: 'cm-ais/claude-haiku-5-5' } } } },
+    { type: 'assistant/message', time: bjTime(12), data: { turn: 1, usage: { inputTokens: 0, cacheReadTokens: 1_000_000, outputTokens: 0 } } },
+  ])
+  const line = def.wire.view(s).spent.models.find(m => m.model === 'claude-haiku-5-5')
+  assert.equal(line?.estimated, true, '❌ 估算单价应标 estimated=true（面板用 ≈ 显示）')
+}
+
+// ── 6h. 币种不符：配置只有美元价，人民币账户应标未计价，而不是拿美元价顶 ──
+{
+  const prices: ConfiguredPrice[] = [{
+    model: 'gpt-6.1-sol', currency: 'USD',
+    inputPerMillion: 2, cacheReadPerMillion: 0.1, cacheWritePerMillion: 2, outputPerMillion: 10,
+  }]
+  const def = createGoalBudgetProjection({ currency: () => 'CNY', prices })
+  const s = fold(def, [
+    { type: 'request/header', data: { header: { config: { provider: 'magpie-responses', model: 'cm-ais/gpt-6.1-sol' } } } },
+    { type: 'assistant/message', time: bjTime(12), data: { turn: 1, usage: { inputTokens: 1_000_000, outputTokens: 0 } } },
+  ])
+  const view = def.wire.view(s)
+  assert.equal(view.spent.costUsd, 0, '❌ 币种不符时不得拿别的币种的单价计算')
+  const line = view.spent.models.find(m => m.model === 'gpt-6.1-sol')
+  assert.equal(line?.priced, false, '❌ 币种不符的模型应标为未计价')
 }
 
 // ── 7. 框架契约：不关心的事件必须返回同一个引用 ──

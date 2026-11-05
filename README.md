@@ -352,6 +352,41 @@ curl -s "http://127.0.0.1:3425/v1/magpie/usage/requests?model=deepseek-flash&lim
 
 顺带一个发现：网关对 DSH 实际使用的 `cm-ais/deepseek-v4.1-flash` 报 **unpriced**（6,643 次调用、费用记 0）——它的价格表里没有这个模型 id。也就是说这部分消费**在网关自己的账单里看不到金额**，正是本插件补上的缺口。
 
+### 给 DeepSeek 之外的模型配单价
+
+内置价目只有官方 DeepSeek。其它模型（网关、中转站、别家模型）在这里配：
+
+```yaml
+modelPrices:
+  - model: gpt-6.1-sol        # 匹配规则与别名相同：去掉 `供应商/` 前缀、忽略大小写
+    currency: USD
+    inputPerMillion: 2
+    cacheReadPerMillion: 0.1
+    cacheWritePerMillion: 2
+    outputPerMillion: 10
+    estimated: false          # 单价是估算时设 true，面板会用 ≈ 标出
+```
+
+**别抄价目表，抄账单。** `scripts/calibrate-prices.py` 从供应商自己的逐条计费记录里解出这四个单价，并用残差验证：
+
+```sh
+# 反解：能解的解开，token 太少而不可解的明确标出，不编造
+python3 scripts/calibrate-prices.py --agent dsh
+# 验证：给定一组候选单价，逐条核对是否与账单精确一致
+python3 scripts/calibrate-prices.py --verify --model claude-haiku-5-5 \
+  --rates in=0.5,cache_read=0.05,cache_write=0.625,out=2.5
+```
+
+实测结论（同一台网关）：
+
+| 模型 | 结果 |
+| --- | --- |
+| `gpt-6.1-sol` | 504 条记录**逐条精确**：2 / 0.1 / 10 |
+| `claude-sonnet-5-5` | 600 条记录精确解出：2 / 0.1 / 2.5 / 10 |
+| `claude-haiku-5-5` | 大多数请求与 0.5 / 0.05 / 0.625 / 2.5 精确一致，但**有一部分请求恰好按 1/5 计费**（比值 0.200 —— 路由命中了更便宜的上游） |
+
+最后一行的含义很重要：**同一模型、同一上游凭据，供应商仍可能按请求变价**，而会话日志里看不到这个维度。所以这类单价要标 `estimated: true`，面板用 `≈` 显示并写明原因 —— 比给一个看起来精确的数字更诚实。目前只有 DeepSeek 的价目是**逐条核实过**的（197 条记录，误差 0）。
+
 ---
 
 ## 开发

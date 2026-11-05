@@ -339,6 +339,41 @@ The same session (9,958 events) under both settings:
 
 One more finding: the gateway reports `cm-ais/deepseek-v4.1-flash` - the id DSH actually uses - as **unpriced** (6,643 calls, cost recorded as 0), because its price table has no entry for that id. That spending is therefore invisible in the gateway's own bill, which is exactly the gap this plugin fills.
 
+### Pricing models other than DeepSeek
+
+The built-in tariff covers official DeepSeek only. Everything else (a gateway, a relay, another vendor) goes here:
+
+```yaml
+modelPrices:
+  - model: gpt-6.1-sol        # matched like an alias: the `vendor/` prefix is stripped, case-insensitive
+    currency: USD
+    inputPerMillion: 2
+    cacheReadPerMillion: 0.1
+    cacheWritePerMillion: 2
+    outputPerMillion: 10
+    estimated: false          # set true when the rate is an estimate; the panel then shows ≈
+```
+
+**Do not copy a price list; reconcile the bill.** `scripts/calibrate-prices.py` solves those four rates from the provider's own per-request charges and verifies them by residual:
+
+```sh
+# solve: what can be determined is; what cannot (too few tokens in a bucket) is named, never invented
+python3 scripts/calibrate-prices.py --agent dsh
+# verify: check one candidate rate set against every record
+python3 scripts/calibrate-prices.py --verify --model claude-haiku-5-5 \
+  --rates in=0.5,cache_read=0.05,cache_write=0.625,out=2.5
+```
+
+Measured on one gateway:
+
+| Model | Result |
+| --- | --- |
+| `gpt-6.1-sol` | 504 records, **exact on every one**: 2 / 0.1 / 10 |
+| `claude-sonnet-5-5` | solved exactly over 600 records: 2 / 0.1 / 2.5 / 10 |
+| `claude-haiku-5-5` | most requests match 0.5 / 0.05 / 0.625 / 2.5 exactly, but **some are billed at one fifth** (ratio 0.200 - the route hit a cheaper upstream) |
+
+That last row matters: **the provider can charge different prices per request for the same model on the same credential**, and the session log cannot see that dimension. Such rates carry `estimated: true`, and the panel shows `≈` with the reason - which is more honest than a number that looks exact. Only DeepSeek's tariff is verified record by record (197 records, zero error).
+
 ---
 
 ## Development

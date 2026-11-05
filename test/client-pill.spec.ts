@@ -489,6 +489,27 @@ const view = (k: string) => (k === 'goalBudget' ? HOSTED : undefined)
   assert.notEqual(style['width'], 'max-content', '❌ 不能用 max-content 定宽')
 }
 
+// ── 16. 估算金额用 ≈ 标出并附说明 ──
+{
+  remount()
+  activeLocale = 'en'
+  const view = {
+    budget: null,
+    spent: {
+      tokens: 1000, costUsd: 1.25, currency: 'USD', unbilledTurns: 0, unpricedModels: [],
+      models: [{ model: 'claude-haiku-5-5', tokens: 900, costUsd: 1.25, priced: true, estimated: true }],
+    },
+  }
+  const useV = (k: string) => (k === 'goalBudget' ? view : undefined)
+  clickPill(render(Pill, { useProjection: useV }) as El)
+  const opened = render(Pill, { useProjection: useV }) as El
+  const panel = findEl(opened, n => n.props['role'] === 'dialog')
+  assert.ok(panel, '❌ 找不到面板')
+  const text = textOf(panel)
+  assert.match(text, /≈\$1\.25/, `❌ 估算金额应带 ≈：${text}`)
+  assert.match(text, /marks an estimate/, `❌ 应说明是估算：${text}`)
+}
+
 console.log('✅ client-pill.spec.ts 全部通过（13 组断言）')
 console.log('   - 显示宿主给的数，不自己重算')
 console.log('   - 用宿主的 Pill 原语，带 onClick / aria-haspopup / aria-expanded')
