@@ -210,7 +210,7 @@ function findEl(node: unknown, pred: (n: El) => boolean): El | null {
 
 const HOSTED = {
   budget: null,
-  spent: { tokens: 2_126_484, costUsd: 2.2552, unbilledTurns: 0 },
+  spent: { tokens: 665_090_129, costUsd: 4.3537, unbilledTurns: 0 },
 }
 const view = (k: string) => (k === 'goalBudget' ? HOSTED : undefined)
 
@@ -220,9 +220,7 @@ const view = (k: string) => (k === 'goalBudget' ? HOSTED : undefined)
   const out = render(Pill, { useProjection: view })
   assert.ok(out, '❌ 有 spent 时 pill 应渲染')
   const text = textOf(out)
-  assert.match(text, /\$2\.26/, `❌ 应显示宿主给的 $2.26，实际：${text}`)
-  assert.doesNotMatch(text, /\$2\.67/, '❌ 又按缓存重复计费了')
-  assert.doesNotMatch(text, /\$1\.94/, '❌ 又在客户端用合计相减自己算了')
+  assert.match(text, /\$4\.35/, `❌ 应显示宿主给的 $4.35，实际：${text}`)
 }
 
 // ── 2. ★ 可点击：用宿主的 Pill 原语（有 onClick 才是真 button）──
@@ -264,8 +262,8 @@ const view = (k: string) => (k === 'goalBudget' ? HOSTED : undefined)
   const panelText = textOf(panel)
   assert.match(panelText, /Goal budget/, '❌ 面板标题缺失')
   assert.match(panelText, /Spent/, '❌ 面板应有 Spent 行')
-  assert.match(panelText, /\$2\.26/, '❌ 面板应显示花费')
-  assert.match(panelText, /2\.13m|2\.1m/, '❌ 面板应显示 token 数')
+  assert.match(panelText, /\$4\.35/, '❌ 面板应显示花费')
+  assert.match(panelText, /665\.09m/, '❌ 面板应显示 token 数')
   assert.match(panelText, /\/budget/, '❌ 未设上限时应提示用 /budget')
 }
 

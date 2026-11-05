@@ -201,11 +201,12 @@ Attribution is **rebuilt from the session log**, never stored separately — res
 
 The pill does not compute cost. It reads it from the same projection the gate uses, so the number you see and the number that blocks can never disagree.
 
-That matters more than it sounds. The correct figure is a **per-record** `max(0, inputTokens − cacheReadTokens)` summed over steps, because a single record's `inputTokens` includes its cache reads — but a session's cache-read total can dwarf its input total (one measured session: 4.87M input against 400M cache reads). Subtracting the two totals instead of per record gives `max(0, negative)` → zero, and the estimate lands 15%+ away from the real number.
+Pricing follows DSH's `TokenUsage` contract (`packages/llm/llm/src/types.ts:177`):
 
-Two earlier versions got this wrong in two different ways: one priced all input at the full rate and overstated by ~18%; the next subtracted the totals and understated. Both were caught, and both are asserted against now.
+- `inputTokens` holds only **uncached** input; cache hits are reported separately in `cacheReadTokens`. The three buckets are disjoint, and billed input is their sum.
+- `reasoningTokens` is a **subset** of `outputTokens` and is billed once, at the output price.
 
-The cost convention is also the reason the projection folds `assistant/message` usage itself rather than exposing raw totals: only the host can run the arithmetic that the gate runs.
+**This is an error I introduced.** In 0.5.0 I assumed `inputTokens` included cache hits and subtracted the cache from it. That under-counted uncached input, and the damage was largest in sessions with high cache-hit rates. The figures I had written earlier — "overstates by 2.7×" and "15%+ away" — were computed on that false assumption and have been removed. 0.8.1 corrects this and adds a regression test built from a real session's totals.
 
 ### Why `ctx.goals.block()` and not something else
 
@@ -262,12 +263,19 @@ Known, with current mitigation and what is still unsolved.
 | 9 | ~~`/budget` override is process-local~~ | ~~a restart returns the session to the profile default~~ | **Fixed**: the override lives in the `goalBudget` projection, folded from the `command/run` events the commands service already writes, so it is rebuilt from the log rather than remembered | — |
 | 10 | A budget is blocking a goal, then raised | spend already over the old limit, but nothing re-checks | Setting or clearing a budget clears the blocked marker so the next step re-evaluates | A goal already `blocked` stays blocked until the operator resumes it |
 | 11 | Client and host each compute cost | the number shown disagrees with the number that blocks | The host computes it into the projection; **the client only displays** | The client cannot read the profile default, so a denominator appears only when a session cap is set |
+| 12 | Cache hits subtracted from input | uncached input under-counted; largest error in high-hit sessions | Fixed in 0.8.1: the three input buckets are priced disjointly; regression test uses a real session's totals | — |
 
 Number 7 is the one to watch: it fails *silently*. So does number 8. Both were found by testing behaviour rather than checking for absence of errors — the same shape as the harness's own post-mortem 0001, where 178 green tests and 100% line coverage coexisted with a completely non-functional feature.
 
 ### Cache pricing
 
-At a 90% cache-hit ratio, ignoring `cacheReadTokens` overstates cost by **2.7×** on a measured scenario (1000 input / 900 cached / 100 output). The error is not a fixed multiple — it grows with the hit ratio, and the unit price gap is ~50×. So `cacheReadTokens` is priced separately and subtracted from `inputTokens` to avoid double-billing.
+A cache hit costs about 1/50 of an uncached input token (off-peak: $0.003 against $0.15). In a high-hit session it is still a large share of the bill: one real session had about 651M cache-hit tokens against 13.2M uncached input tokens, and with the three buckets priced disjointly, cache hits and uncached input each account for about 45% of the cost. Pricing a cache hit at the uncached rate overstates that portion about 50×.
+
+### Unit prices and peak hours
+
+The default prices come from the [DeepSeek API pricing page](https://api-docs.deepseek.com/quick_start/pricing/) for `deepseek-flash` (DeepSeek-V4.1-Flash-1017) at the **off-peak** rate: uncached input $0.15, cache hit $0.003, output $0.6 per million tokens. During peak hours (01:00–04:00 and 06:00–10:00 UTC, Monday to Friday, excluding Chinese public holidays) the prices double.
+
+The plugin currently prices at the fixed off-peak rate, so peak-hour cost is under-counted by about half. This is an open issue (see failure mode 2). If your route goes through a gateway such as AIS / Compass, the gateway's actual billing may differ; override `pricing` with the gateway's prices.
 
 ---
 

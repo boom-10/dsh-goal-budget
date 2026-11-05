@@ -65,15 +65,29 @@ export type TurnOwnership = { goalId: string; round: number }
  */
 export function costOf(usage: TokenUsage, p: Pricing): number {
   const M = 1_000_000
+  // 三个输入桶并列（packages/llm/llm/src/types.ts:177）：inputTokens 只含未命中缓存的部分，
+  // 缓存命中在 cacheReadTokens。不能从 inputTokens 里再扣一次 —— 0.5.0 就是这么错的。
   const cacheRead = usage.cacheReadTokens ?? 0
-  // inputTokens 是否已包含 cacheRead，各适配器口径可能不同。
-  // 保守做法：从 inputTokens 里扣掉 cacheRead，避免重复计费。
-  const freshInput = Math.max(0, usage.inputTokens - cacheRead)
+  const cacheWrite = usage.cacheWriteTokens ?? 0
+  // DeepSeek 不对缓存写入单独收费，按未命中价计（实测会话的 cacheWrite 为 0）。
+  // reasoningTokens 是 outputTokens 的子集（token-meter 的 turn-usage.spec.ts 把
+  // 「reasoning 超过 output」列为非法），所以只按输出价计一次。
   return (
-    (freshInput / M) * p.inputPerMillion +
+    ((usage.inputTokens + cacheWrite) / M) * p.inputPerMillion +
     (cacheRead / M) * p.cacheReadPerMillion +
-    ((usage.outputTokens + (usage.reasoningTokens ?? 0)) / M) * p.outputPerMillion
+    (usage.outputTokens / M) * p.outputPerMillion
   )
+}
+
+/**
+ * 计费口径的 token 数：三个输入桶加输出。
+ *
+ * 与宿主 UsagePill 的「用量」一致（token-meter 的 billedInputTokens + outputTokens）。
+ * 预算的 token 上限用这个数，所以缓存命中也计入 —— 否则在 98% 缓存命中的会话里，
+ * token 上限只会数到 2% 的实际用量。
+ */
+export function billedTokensOf(usage: TokenUsage): number {
+  return usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0) + usage.outputTokens
 }
 
 /**
@@ -142,7 +156,7 @@ export function totalsOf(spend: GoalSpend): {
   let costUsd = 0
   let wallClockMs = 0
   for (const t of spend.rounds.values()) {
-    tokens += t.inputTokens + t.outputTokens + t.reasoningTokens
+    tokens += t.inputTokens + t.cacheReadTokens + t.cacheWriteTokens + t.outputTokens
     costUsd += t.costUsd
     if (t.startedAt !== undefined && t.endedAt !== undefined) {
       wallClockMs += Math.max(0, t.endedAt - t.startedAt)

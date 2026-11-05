@@ -14,7 +14,7 @@
  */
 
 import { z } from 'zod'
-import { costOf, type Pricing } from './accounting.ts'
+import { billedTokensOf, costOf, type Pricing } from './accounting.ts'
 import { parseBudgetCommand } from './budget-command.ts'
 
 /** 客户端读到的形状。 */
@@ -90,7 +90,7 @@ export function createGoalBudgetProjection(pricing: Pricing = DEFAULT_PRICING) {
       // ── ② 模型消费 ──
       if (event?.type === 'assistant/message') {
         const usage = data?.['usage'] as
-          | { inputTokens: number; outputTokens: number; cacheReadTokens?: number; reasoningTokens?: number }
+          | { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number; reasoningTokens?: number }
           | undefined
 
         if (usage === undefined) {
@@ -101,11 +101,10 @@ export function createGoalBudgetProjection(pricing: Pricing = DEFAULT_PRICING) {
           }
         }
 
-        const freshInput = Math.max(0, usage.inputTokens - (usage.cacheReadTokens ?? 0))
         return {
           budget: state.budget,
           spent: {
-            tokens: state.spent.tokens + freshInput + usage.outputTokens + (usage.reasoningTokens ?? 0),
+            tokens: state.spent.tokens + billedTokensOf(usage),
             costUsd: state.spent.costUsd + costOf(usage, pricing),
             unbilledTurns: state.spent.unbilledTurns,
           },
@@ -121,7 +120,7 @@ export function createGoalBudgetProjection(pricing: Pricing = DEFAULT_PRICING) {
       view: (state: GoalBudgetState): GoalBudgetState => state,
     },
 
-    stateVersion: 2,
+    stateVersion: 3,
   } as const
 }
 

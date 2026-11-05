@@ -34,7 +34,7 @@ export const inject = ['commands', 'goals', 'sessions', 'sessionProjections', 'a
 export const Config = z.object({
   budget: z
     .object({
-      /** 累计 token 上限（input+output+reasoning）。0 = 不限制。 */
+      /** 累计 token 上限（输入含缓存命中，加输出：与宿主「用量」口径一致）。0 = 不限制。 */
       tokens: z.number().default(0),
       /** 累计费用上限（美元，按下面的单价估算）。0 = 不限制。 */
       costUsd: z.number().default(0),
