@@ -2,9 +2,9 @@
 
 > A resource budget gate for DeepSeek Harness goals. When the budget runs out it **blocks the goal** — it does not just show you a number.
 
-![Click the pill beside the composer for a spend breakdown](docs/panel.png)
+![The spend breakdown, opened from the pill](docs/panel.png)
 
-<p align="center"><sub>The pill shows live spend; clicking it opens the breakdown. The bar turns amber at 80% and red at 100%.</sub></p>
+<p align="center"><sub>Clicking the pill at the right of the composer opens the breakdown for this session. The figures are computed by the host, using the same math the gate does.</sub></p>
 
 **Other languages:** [中文（默认）](README.md)
 
@@ -89,20 +89,20 @@ The budget is resolved as **session override ?? profile default**, so a fixed al
 
 ### 2. Watch it on the pill
 
-A pill appears at the right of the composer:
+A pill appears in the composer's status bar, beside the host's own cache-hit and context readings:
 
-```
-● $2.41  ◐ 21%        ← click it
-```
+![The pill in the composer status bar](docs/pill.png)
 
-The breakdown is built from the host's own primitives, so its look, keyboard reachability, and click-outside dismissal match the official pills:
+<p align="center"><sub>The rightmost <code>● $2.49</code> is this plugin. To its left are the host's own readings, and to its right the context meter.</sub></p>
+
+Click it for the breakdown (built from the host's own primitives, so its look, keyboard reachability, and click-outside dismissal match the official pills):
 
 ```
 ┌──────────────────────────────┐
-│ Goal budget              21% │
+│ Goal budget              50% │
 │ ──────────────────────────── │
-│ Spent                  $2.41 │
-│ Tokens                 3.60m │
+│ Spent                  $2.49 │
+│ Tokens                 3.89m │
 │ Budget                    $5 │
 │ Binding                 cost │
 │ Priced by the host with the  │
@@ -110,6 +110,8 @@ The breakdown is built from the host's own primitives, so its look, keyboard rea
 │ uses                         │
 └──────────────────────────────┘
 ```
+
+**Once a cap is set**, the percentage appears in the title row and the pill grows a progress bar — amber at 80%, red at 100%.
 
 **Copy follows the DSH language setting** — the panel is translated, not hardcoded.
 
