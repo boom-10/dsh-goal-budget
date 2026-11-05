@@ -93,7 +93,7 @@ A pill appears in the composer's status bar, beside the host's own cache-hit and
 
 ![The pill in the composer status bar](docs/pill.png)
 
-<p align="center"><sub>The rightmost <code>● $2.49</code> is this plugin. To its left are the host's own readings, and to its right the context meter.</sub></p>
+<p align="center"><sub><code>● $2.50 / $5.00</code> in the status bar is this plugin - the host's own readings sit to its left, the context meter to its right.</sub></p>
 
 Click it for the breakdown (built from the host's own primitives, so its look, keyboard reachability, and click-outside dismissal match the official pills):
 
@@ -101,9 +101,9 @@ Click it for the breakdown (built from the host's own primitives, so its look, k
 ┌──────────────────────────────┐
 │ Goal budget              50% │
 │ ──────────────────────────── │
-│ Spent                  $2.49 │
-│ Tokens                 3.89m │
-│ Budget                    $5 │
+│ Spent                  $2.50 │
+│ Tokens                 3.90m │
+│ Budget                 $5.00 │
 │ Binding                 cost │
 │ Priced by the host with the  │
 │ same math the budget gate    │
@@ -111,7 +111,7 @@ Click it for the breakdown (built from the host's own primitives, so its look, k
 └──────────────────────────────┘
 ```
 
-**Once a cap is set**, the percentage appears in the title row and the pill grows a progress bar — amber at 80%, red at 100%.
+**Two states**: with no cap the panel shows the "no session cap" hint instead of a percentage; once one is set, the percentage appears in the title row and the pill grows a progress bar — **amber at 80%, red at 100%** (the shot above is 50%, so it is still blue).
 
 **Copy follows the DSH language setting** — the panel is translated, not hardcoded.
 
