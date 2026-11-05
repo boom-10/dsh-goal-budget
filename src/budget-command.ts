@@ -10,11 +10,17 @@
  *
  * 三个维度是**并列**的，谁先到算谁（见 `checkBudget`）。
  */
+/** 费用金额的币种。 */
+export type CostCurrency = 'USD' | 'CNY'
+
 export interface Budget {
   readonly tokens: number
+  /** 费用上限，单位见 costCurrency（缺省美元）。字段名沿用旧版本，避免破坏已发布的快照格式。 */
   readonly costUsd: number
   /** 计算时间上限（毫秒）。0 = 不限制。 */
   readonly wallClockMs: number
+  /** 费用上限的币种。只有 costUsd > 0 时才有意义。 */
+  readonly costCurrency?: CostCurrency
 }
 
 /** `/budget` 的解析结果。 */
@@ -71,15 +77,22 @@ export function formatDuration(ms: number): string {
  */
 function parseAmount(
   raw: string,
-): { kind: 'tokens' | 'costUsd' | 'wallClockMs'; value: number } | undefined {
+): { kind: 'tokens' | 'costUsd' | 'wallClockMs'; value: number; currency?: CostCurrency } | undefined {
   const text = raw.trim().toLowerCase()
   if (text.length === 0) return undefined
 
-  // 金额：$5 / $0.50 / 5$
+  // 金额（美元）：$5 / $0.50 / 5$
   const usd = /^\$(\d+(?:\.\d+)?)$|^(\d+(?:\.\d+)?)\$$/.exec(text)
   if (usd) {
     const value = Number(usd[1] ?? usd[2])
-    return Number.isFinite(value) && value > 0 ? { kind: 'costUsd', value } : undefined
+    return Number.isFinite(value) && value > 0 ? { kind: 'costUsd', value, currency: 'USD' } : undefined
+  }
+
+  // 金额（人民币）：¥30 / 30¥ / 30元 / cny30 / 30cny
+  const cny = /^(?:¥|cny)(\d+(?:\.\d+)?)$|^(\d+(?:\.\d+)?)(?:¥|元|cny)$/.exec(text)
+  if (cny) {
+    const value = Number(cny[1] ?? cny[2])
+    return Number.isFinite(value) && value > 0 ? { kind: 'costUsd', value, currency: 'CNY' } : undefined
   }
 
   // 时长：30s / 5min / 2h —— 先试，因为 's'/'h' 不会被 token 规则吃掉
@@ -128,6 +141,7 @@ export function parseBudgetCommand(rawInput: string): BudgetCommand {
   const words = input.split(/\s+/).filter(w => w.length > 0)
   let tokens = 0
   let costUsd = 0
+  let costCurrency: CostCurrency | undefined
   let wallClockMs = 0
   const labels: string[] = []
 
@@ -143,7 +157,8 @@ export function parseBudgetCommand(rawInput: string): BudgetCommand {
       case 'costUsd':
         if (costUsd > 0) return { kind: 'invalid', reason: '金额只能写一次。' }
         costUsd = parsed.value
-        labels.push(`$${parsed.value}`)
+        costCurrency = parsed.currency ?? 'USD'
+        labels.push(`${costCurrency === 'CNY' ? '¥' : '$'}${parsed.value}`)
         break
       case 'tokens':
         if (tokens > 0) return { kind: 'invalid', reason: 'token 数只能写一次。' }
@@ -161,7 +176,11 @@ export function parseBudgetCommand(rawInput: string): BudgetCommand {
   if (tokens === 0 && costUsd === 0 && wallClockMs === 0) {
     return { kind: 'invalid', reason: '至少要给一个上限。' }
   }
-  return { kind: 'set', budget: { tokens, costUsd, wallClockMs }, label: labels.join(' + ') }
+  return {
+    kind: 'set',
+    budget: { tokens, costUsd, wallClockMs, ...(costCurrency === undefined ? {} : { costCurrency }) },
+    label: labels.join(' + '),
+  }
 }
 
 /** 人类可读的 token 数：`523000` → `523k`。 */
@@ -171,10 +190,16 @@ export function formatTokens(n: number): string {
   return String(n)
 }
 
-/** 人类可读的金额。 */
+/** 人类可读的金额，带币种符号。 */
+export function formatMoney(n: number, currency: CostCurrency = 'USD'): string {
+  const symbol = currency === 'CNY' ? '¥' : '$'
+  if (n === 0) return `${symbol}0`
+  return n < 0.01 ? `${symbol}${n.toFixed(4)}` : `${symbol}${n.toFixed(n < 1 ? 3 : 2)}`
+}
+
+/** 人类可读的美元金额（旧调用方使用）。 */
 export function formatUsd(n: number): string {
-  if (n === 0) return '$0'
-  return n < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(n < 1 ? 3 : 2)}`
+  return formatMoney(n, 'USD')
 }
 
 /** 预算的人类可读描述。 */
@@ -182,7 +207,7 @@ export function describeBudget(b: Budget): string {
   if (isUnlimited(b)) return '无限制'
   const parts: string[] = []
   if (b.tokens > 0) parts.push(`${formatTokens(b.tokens)} tokens`)
-  if (b.costUsd > 0) parts.push(formatUsd(b.costUsd))
+  if (b.costUsd > 0) parts.push(formatMoney(b.costUsd, b.costCurrency ?? 'USD'))
   if (b.wallClockMs > 0) parts.push(formatDuration(b.wallClockMs))
   return parts.join(' 或 ')
 }
@@ -200,6 +225,7 @@ export function renderBudget(
   used: { tokens: number; costUsd: number; wallClockMs: number } | undefined,
 ): string {
   const lines: string[] = []
+  const cur: CostCurrency = effective.costCurrency ?? 'USD'
   lines.push(`预算：${describeBudget(effective)}`)
   lines.push(source === 'session' ? '来源：本会话设置' : '来源：profile 默认')
 
@@ -211,7 +237,7 @@ export function renderBudget(
     }
     if (effective.costUsd > 0) {
       const pct = ((used.costUsd / effective.costUsd) * 100).toFixed(0)
-      ratios.push(`费用 ${formatUsd(used.costUsd)} / ${formatUsd(effective.costUsd)}（${pct}%）`)
+      ratios.push(`费用 ${formatMoney(used.costUsd, cur)} / ${formatMoney(effective.costUsd, cur)}（${pct}%）`)
     }
     if (effective.wallClockMs > 0) {
       const pct = ((used.wallClockMs / effective.wallClockMs) * 100).toFixed(0)
@@ -220,7 +246,7 @@ export function renderBudget(
     if (ratios.length > 0) lines.push(`已用：${ratios.join(' · ')}`)
   } else if (used !== undefined) {
     lines.push(
-      `已用：${formatTokens(used.tokens)} tokens · ${formatUsd(used.costUsd)}` +
+      `已用：${formatTokens(used.tokens)} tokens · ${formatMoney(used.costUsd, cur)}` +
       ` · ${formatDuration(used.wallClockMs)}`,
     )
   }

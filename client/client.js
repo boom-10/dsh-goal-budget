@@ -59,6 +59,7 @@ window.__ModuleLoader__.load({
         unbilled: '{count} 轮未上报 token 用量，未计入',
         provenance: '由宿主计价，与预算判定同一套算法',
         unpriced: '未计价：{models}（费用未计入，请在价格表里配置）',
+        currencyUnknown: '账户币种未识别，费用暂不计入；请在配置里设置 currency（USD 或 CNY）',
         summaryNone: '本会话已花费 {cost}，未设上限',
         summaryCapped: '本会话已花费 {cost}，上限 {limit}，已用 {percent}%',
       },
@@ -75,6 +76,7 @@ window.__ModuleLoader__.load({
         unbilled: '{count} turn(s) reported no token usage and are not counted',
         provenance: 'Priced by the host with the same math the budget gate uses',
         unpriced: 'No price for {models}; its cost is not counted (add it to the price table)',
+        currencyUnknown: 'Account currency not detected yet; cost is not counted. Set currency (USD or CNY) in the config.',
         summaryNone: 'Session spend {cost}, no cap set',
         summaryCapped: 'Session spend {cost} of {limit} budget, {percent}% used',
       },
@@ -118,9 +120,11 @@ window.__ModuleLoader__.load({
     const DIM = { opacity: 0.7 }
     const NOTE = { marginTop: '10px', fontSize: '11px', lineHeight: '16px', opacity: 0.7 }
 
-    function usd(n) {
-      if (n <= 0) return '$0'
-      return n < 0.01 ? '$' + n.toFixed(4) : '$' + n.toFixed(n < 1 ? 3 : 2)
+    /** 金额按币种显示：人民币为 ¥，其余（含未指定）为 $。 */
+    function usd(n, currency) {
+      const sym = currency === 'CNY' ? '¥' : '$'
+      if (n <= 0) return sym + '0'
+      return n < 0.01 ? sym + n.toFixed(4) : sym + n.toFixed(n < 1 ? 3 : 2)
     }
 
     function num(n) {
@@ -152,6 +156,8 @@ window.__ModuleLoader__.load({
 
     /** 用过但没有单价的模型：列出它们，并说明费用没有计入。 */
     function unpricedLine(spent, t) {
+      // 币种尚未识别：费用无法计算，明确说明，而不是显示 $0 冒充已计价。
+      if (spent.currency === null && spent.tokens > 0) return h('div', { style: NOTE }, t('currencyUnknown'))
       const models = spent.unpricedModels
       if (!models || models.length === 0) return null
       return h('div', { style: NOTE }, t('unpriced', { models: models.join(', ') }))
@@ -190,7 +196,7 @@ window.__ModuleLoader__.load({
       let binding = null
       if (budget !== null && budget !== undefined) {
         const dims = []
-        if (budget.costUsd > 0) dims.push({ r: spent.costUsd / budget.costUsd, limit: usd(budget.costUsd), dim: 'cost' })
+        if (budget.costUsd > 0) dims.push({ r: spent.costUsd / budget.costUsd, limit: usd(budget.costUsd, budget.costCurrency), dim: 'cost' })
         if (budget.tokens > 0) dims.push({ r: spent.tokens / budget.tokens, limit: num(budget.tokens), dim: 'tokens' })
         if (dims.length > 0) {
           const worst = dims.reduce((a, b) => (b.r > a.r ? b : a))
@@ -208,8 +214,8 @@ window.__ModuleLoader__.load({
       const dotState = over ? 'error' : near ? 'warning' : 'done'
 
       const summary = ratio === null
-        ? t('summaryNone', { cost: usd(spent.costUsd) })
-        : t('summaryCapped', { cost: usd(spent.costUsd), limit: limitText, percent: Math.round(ratio * 100) })
+        ? t('summaryNone', { cost: usd(spent.costUsd, spent.currency) })
+        : t('summaryCapped', { cost: usd(spent.costUsd, spent.currency), limit: limitText, percent: Math.round(ratio * 100) })
 
       const pct = ratio === null ? null : Math.round(ratio * 100)
 
@@ -225,7 +231,7 @@ window.__ModuleLoader__.load({
                 h('span', null, t('title')),
                 pct === null ? null : h('span', { style: NUM }, pct + '%')),
               h('div', { style: RULE }),
-              row(t('spent'), usd(spent.costUsd)),
+              row(t('spent'), usd(spent.costUsd, spent.currency)),
               row(t('tokens'), num(spent.tokens)),
               budget === null || budget === undefined
                 ? h('div', { style: Object.assign({}, NOTE, { marginTop: '2px' }) },
@@ -254,7 +260,7 @@ window.__ModuleLoader__.load({
           'data-goal-budget-pill': 'spend',
         },
           h(StateDot, { state: dotState, size: 8 }),
-          h('span', null, usd(spent.costUsd)),
+          h('span', null, usd(spent.costUsd, spent.currency)),
           limitText === null ? null : h('span', { style: { opacity: 0.55 } }, '/ ' + limitText),
           ratio === null ? null : bar(ratio, color),
         ),

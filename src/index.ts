@@ -17,9 +17,11 @@
 import z from '@deepseek-ai/schemastery'
 import type { Infer } from '@deepseek-ai/schemastery'
 import {
-  addUsage, checkBudget, DEFAULT_PRICES, findPriceByModel, openRound, pricingAt, totalsOf, UNPRICED,
-  type GoalSpend, type PriceEntry, type TurnSpend,
+  addUsage, checkBudget, openRound, totalsOf, UNPRICED,
+  type GoalSpend, type Pricing, type TurnSpend,
 } from './accounting.ts'
+import { detectAccountCurrency, type CredentialsService } from './currency-detect.ts'
+import { bandAt, calendarCovers, canonicalDeepSeekModel, ratesFor, type Band, type CanonicalModel, type Currency } from './tariff.ts'
 import {
   describeBudget, formatDuration, formatTokens, formatUsd, isUnlimited,
   parseBudgetCommand, renderBudget, type Budget,
@@ -36,30 +38,19 @@ export const Config = z.object({
     .object({
       /** 累计 token 上限（输入含缓存命中，加输出：与宿主「用量」口径一致）。0 = 不限制。 */
       tokens: z.number().default(0),
-      /** 累计费用上限（美元，按下面的单价估算）。0 = 不限制。 */
+      /** 累计费用上限，单位为账户币种（见 currency）。0 = 不限制。 */
       costUsd: z.number().default(0),
       /** 累计计算时间上限（毫秒）：各轮跨度之和，不含轮与轮之间的空闲。0 = 不限制。 */
       wallClockMs: z.number().default(0),
     })
     .default({ tokens: 0, costUsd: 0, wallClockMs: 0 }),
   /**
-   * 价格表，按模型 id 匹配（不区分网关）。留空则使用内置的 DeepSeek 官方价格。
-   * 查不到单价的模型：token 照常计入，费用不计，并在面板里列出它的名字。
+   * 账户币种。`auto` 用 DeepSeek 余额接口识别（只对官方线路有效）；网关线路请直接指定 USD 或 CNY。
+   * 价目是 DeepSeek 官方的，按这个币种选用：美元账户用美元价，人民币账户用人民币价。
    */
-  prices: z
-    .array(
-      z.object({
-        model: z.string(),
-        inputPerMillion: z.number(),
-        outputPerMillion: z.number(),
-        cacheReadPerMillion: z.number(),
-        /** 高峰价相对非高峰价的倍数。官方 DeepSeek 为 2；网关不分时段就设 1。 */
-        peakMultiplier: z.number().default(2),
-        /** `YYYY-MM-DD`：这些日期全天按非高峰计（官方排除中国法定节假日，需要你维护）。 */
-        holidays: z.array(z.string()).default([]),
-      }),
-    )
-    .default([]),
+  currency: z.union([z.const('auto'), z.const('USD'), z.const('CNY')]).default('auto'),
+  /** 凭据服务里 DeepSeek API Key 的引用名（与 DeepSeek 路由使用的名字一致）。 */
+  deepseekCredentialRef: z.string().default('DEEPSEEK_API_KEY'),
   /** 超预算时的动作。`block` 会调 ctx.goals.block() 并自动 disarm。 */
   onExceed: z.union([z.const('block'), z.const('warn')]).default('block'),
   /** 达到该比例时注入一次提醒（0–1）。0 = 不提醒。 */
@@ -69,7 +60,8 @@ export const Config = z.object({
 /** 与上面的 Config schema 一一对应。schema 改了这个也要改 —— tsc 会检查赋值处。 */
 export interface GoalBudgetConfig {
   budget: { tokens: number; costUsd: number; wallClockMs: number }
-  prices: readonly PriceEntry[]
+  currency: 'auto' | Currency
+  deepseekCredentialRef: string
   onExceed: 'block' | 'warn'
   warnAtRatio: number
 }
@@ -190,19 +182,25 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
       : { budget: override, source: 'session' }
   }
 
-  const prices: readonly PriceEntry[] = config.prices.length > 0 ? config.prices : DEFAULT_PRICES
-  for (const e of prices) {
-    if (e.inputPerMillion < 0 || e.outputPerMillion < 0 || e.cacheReadPerMillion < 0) {
-      throw new Error(`[goal-budget] 模型 ${e.model} 的单价不能为负`)
-    }
-    if (!(e.peakMultiplier >= 1)) {
-      throw new Error(`[goal-budget] 模型 ${e.model} 的 peakMultiplier 不能小于 1（高峰价不会比非高峰便宜），得到 ${e.peakMultiplier}`)
-    }
-    for (const day of e.holidays) {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
-        throw new Error(`[goal-budget] 模型 ${e.model} 的 holidays 应为 YYYY-MM-DD，得到 ${day}`)
-      }
-    }
+  // 币种：配置写死，或由 DeepSeek 余额接口识别（异步）。识别完成前，费用暂不计入。
+  let currency: Currency | undefined = config.currency === 'auto' ? undefined : config.currency
+  if (config.currency === 'auto') {
+    void detectAccountCurrency(ctx.get?.('credentials') as CredentialsService | undefined, config.deepseekCredentialRef).then(
+      (detected) => {
+        if (detected === undefined) {
+          ctx.logger.warn('[goal-budget] 没能从 DeepSeek 余额接口识别账户币种，费用暂不计入；请在配置里设置 currency（USD 或 CNY）')
+          return
+        }
+        currency = detected
+        console.log(`[goal-budget] DeepSeek 账户币种：${detected}`)
+      },
+      (error: unknown) => {
+        ctx.logger.warn(`[goal-budget] 币种识别失败，费用暂不计入：${String(error)}`)
+      },
+    )
+  }
+  if (!calendarCovers(Date.now())) {
+    ctx.logger.warn('[goal-budget] 节假日日历不覆盖当前年份，假期的峰谷判断不准确；请运行 scripts/build-holidays.py 更新')
   }
   const unlimited = isUnlimited(profileBudget)
 
@@ -211,7 +209,7 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
    * 顺带让「重启后预算还在」成立：日志里有 `/budget` 事件，状态就能重建。
    */
   // 单价与宿主 Config 同源 —— 客户端显示的数就是阻断判定用的数。
-  const projectionHandle = ctx.sessionProjections.register(createGoalBudgetProjection(prices))
+  const projectionHandle = ctx.sessionProjections.register(createGoalBudgetProjection(() => currency))
   // register 可能是异步的；失败不能拖垮插件加载（postmortem 0001 的教训：
   // 加载期的异常会让整个 fiber 失败）。
   void Promise.resolve(projectionHandle).catch((error: unknown) => {
@@ -254,6 +252,13 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
           return { kind: 'success', text: renderBudget(budget, source, usedFor(invocation.agent)) }
         }
         case 'set': {
+          if (
+            parsed.budget.costUsd > 0 && parsed.budget.costCurrency !== undefined &&
+            currency !== undefined && parsed.budget.costCurrency !== currency
+          ) {
+            const symbol = currency === 'CNY' ? '¥' : '$'
+            return { kind: 'error', text: `本会话的账户币种是 ${currency}，费用上限请用 ${symbol} 设定（例如 /budget ${symbol}${currency === 'CNY' ? '30' : '5'}）。` }
+          }
           sessionOverrides.set(invocation.agent, parsed.budget)
           // 改了预算就重置「已阻断」标记，否则调高预算后不会重新生效。
           const l = ledgers.get(invocation.agent)
@@ -353,17 +358,35 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
       // 这里补开这一轮，否则 startedAt 会一直是 undefined，时长恒为 0。
       const opened = at === undefined ? prev : openRound(prev, at)
       const route = routeBySession.get(session)
-      const entry = findPriceByModel(prices, route?.model)
-      if (entry === undefined) spend.unpricedTurns = (spend.unpricedTurns ?? 0) + 1
-      const next = addUsage(opened, data?.usage, entry === undefined ? UNPRICED : pricingAt(entry, at), at)
+      const model = canonicalDeepSeekModel(route?.model)
+      const pricing = model === undefined || currency === undefined || at === undefined
+        ? undefined
+        : pricingOf(model, currency, bandAt(at))
+      if (pricing === undefined) spend.unpricedTurns = (spend.unpricedTurns ?? 0) + 1
+      const next = addUsage(opened, data?.usage, pricing ?? UNPRICED, at)
       spend.rounds.set(own.round, next)
       if (!next.attributable) spend.unattributableTurns += 1
       void session
       const { budget: effective } = resolveBudget(own.agent)
-      evaluate(ctx, l, own.goalId, own.agent, effective, config.onExceed, config.warnAtRatio ?? 0)
+      evaluate(ctx, l, own.goalId, own.agent, costInCurrency(effective, currency), config.onExceed, config.warnAtRatio ?? 0)
       return
     }
   }) as never)
+}
+
+/**
+ * 费用上限只对账户币种有效：币种不符，或尚未识别时，费用维度不参与判定（token 与时间照常）。
+ * 没有标明币种的上限（profile 默认）按账户币种理解。
+ */
+function costInCurrency(b: Budget, currency: Currency | undefined): Budget {
+  if (b.costUsd <= 0 || b.costCurrency === undefined) return b
+  return currency !== undefined && b.costCurrency === currency ? b : { ...b, costUsd: 0 }
+}
+
+/** 官方价目 → addUsage 的单价形状（输入未命中、缓存命中、输出）。 */
+function pricingOf(model: CanonicalModel, currency: Currency, band: Band): Pricing {
+  const r = ratesFor(model, currency, band)
+  return { inputPerMillion: r.cacheMiss, outputPerMillion: r.output, cacheReadPerMillion: r.cacheHit }
 }
 
 /** 某会话所有 goal 的累计用量 —— 给 `/budget` 显示用。 */

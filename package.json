@@ -1,6 +1,6 @@
 {
   "name": "dsh-goal-budget",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "Resource budget for DeepSeek Harness goals: attribute token spend to the current goal and block it when a configured budget is exhausted.",
   "type": "module",
   "license": "MIT",
@@ -14,7 +14,8 @@
     "docs",
     "cordis.patch.yml",
     "README.md",
-    "README.en.md"
+    "README.en.md",
+    "THIRD_PARTY"
   ],
   "keywords": [
     "dsh",

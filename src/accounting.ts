@@ -92,76 +92,8 @@ export function billedTokensOf(usage: TokenUsage): number {
   return usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0) + usage.outputTokens
 }
 
-/**
- * 一个模型的价格（每百万 token）。按模型 id 匹配，不区分网关。
- *
- * 价格表来自插件配置。DSH 的公开接口不暴露单价（LlmModelInfo 里没有 cost；
- * pi-ai 目录里查不到的模型，单价会默认成 0），所以插件不能向 DSH 要价格。
- */
-export type PriceEntry = {
-  readonly model: string
-  readonly inputPerMillion: number
-  readonly outputPerMillion: number
-  readonly cacheReadPerMillion: number
-  /** 高峰价相对非高峰价的倍数；1 表示不分时段。官方 DeepSeek 为 2。 */
-  readonly peakMultiplier: number
-  /** `YYYY-MM-DD` 列表：这些日期全天按非高峰计。官方排除中国法定节假日，这里由你维护。 */
-  readonly holidays: readonly string[]
-}
-
-/** 官方 DeepSeek 非高峰价，来源 api-docs.deepseek.com/quick_start/pricing。 */
-export const DEFAULT_PRICES: readonly PriceEntry[] = [
-  { model: 'deepseek-flash', inputPerMillion: 0.15, outputPerMillion: 0.6, cacheReadPerMillion: 0.003, peakMultiplier: 2, holidays: [] },
-  { model: 'deepseek-v4-pro', inputPerMillion: 0.66, outputPerMillion: 1.98, cacheReadPerMillion: 0.022, peakMultiplier: 2, holidays: [] },
-]
-
-/** 不计费：用于没有单价的模型（token 仍然计入）。 */
+/** 不计费：用于没有单价的用量（token 仍然计入）。 */
 export const UNPRICED: Pricing = { inputPerMillion: 0, outputPerMillion: 0, cacheReadPerMillion: 0 }
-
-/** 按模型 id 找价格。找不到返回 undefined；调用方必须显式处理，不能用别的模型的价格顶替。 */
-export function findPriceByModel(entries: readonly PriceEntry[], model: string | undefined): PriceEntry | undefined {
-  if (model === undefined) return undefined
-  return entries.find(e => e.model === model)
-}
-
-/**
- * 某一时刻是否为高峰时段。
- *
- * 官方规则：UTC 01:00–04:00 与 06:00–10:00，周一至周五，中国法定节假日除外（节假日全天非高峰）。
- * 节假日用 UTC 日期判断：这两个窗口换算成北京时间仍是同一天，所以两种日期一致。
- */
-export function isPeak(at: number, holidays: readonly string[]): boolean {
-  const d = new Date(at)
-  const hour = d.getUTCHours()
-  if (!((hour >= 1 && hour < 4) || (hour >= 6 && hour < 10))) return false
-  const weekday = d.getUTCDay()
-  if (weekday === 0 || weekday === 6) return false
-  return !holidays.includes(d.toISOString().slice(0, 10))
-}
-
-/** 一条价格在某一时刻的实际单价。`at` 缺失时按非高峰计（事件总带 time，这只是类型上的保险）。 */
-export function pricingAt(e: PriceEntry, at: number | undefined): Pricing {
-  if (at === undefined || !isPeak(at, e.holidays)) {
-    return { inputPerMillion: e.inputPerMillion, outputPerMillion: e.outputPerMillion, cacheReadPerMillion: e.cacheReadPerMillion }
-  }
-  const m = e.peakMultiplier
-  return {
-    inputPerMillion: e.inputPerMillion * m,
-    outputPerMillion: e.outputPerMillion * m,
-    cacheReadPerMillion: e.cacheReadPerMillion * m,
-  }
-}
-
-/** 价格表的稳定摘要（FNV-1a），用于投影缓存版本：价格变了，旧缓存必须重建。 */
-export function priceDigest(entries: readonly PriceEntry[]): number {
-  const text = JSON.stringify(entries)
-  let h = 0x811c9dc5
-  for (let i = 0; i < text.length; i++) {
-    h ^= text.charCodeAt(i)
-    h = Math.imul(h, 0x01000193) >>> 0
-  }
-  return h % 1_000_000
-}
 
 /**
  * 记录「这一轮还没开始」—— 第一个事件的时间就是这一轮的起点。

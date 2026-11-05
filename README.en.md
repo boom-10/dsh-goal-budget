@@ -155,13 +155,8 @@ Click it for the breakdown (built from the host's own primitives, so its look, k
       costUsd: 5.00
     onExceed: block        # or 'warn' to only log
     warnAtRatio: 0.8
-    prices:
-      - model: deepseek-flash      # matched by model id, not by gateway
-        inputPerMillion: 0.15      # off-peak, per million tokens
-        outputPerMillion: 0.6
-        cacheReadPerMillion: 0.003
-        peakMultiplier: 2          # peak price as a multiple of off-peak; set 1 if the gateway does not price by time
-        holidays: []               # YYYY-MM-DD; these days are priced off-peak all day
+    currency: auto                       # auto: detect via the DeepSeek balance endpoint (official route); write USD or CNY for a gateway
+    deepseekCredentialRef: DEEPSEEK_API_KEY   # reference name of the key in the credentials service
 ```
 
 Why both layers: a budget is a **runtime decision** — it changes per session — while plugin config is a **deployment decision** read at boot. Putting the budget only in config forces a restart to change something you decide in the moment.
@@ -256,7 +251,7 @@ Known, with current mitigation and what is still unsolved.
 | # | Fails how | Looks like | Mitigation | Still open |
 | --- | --- | --- | --- | --- |
 | 1 | A turn mixes human and goal messages | human spend billed to the goal; premature block | Strict `source.kind === 'goal'` filter | Mixed-turn spend cannot be split cleanly; a warning records when it happens |
-| 2 | Unit prices differ from billing | cost estimate off; wrong block point | prices are per model; a model without a price is listed and not charged; peak hours priced by the UTC window | provider price changes do not follow automatically; holidays are maintained by hand; gateway markups must be entered by hand |
+| 2 | Unit prices differ from billing | cost estimate off; wrong block point | DeepSeek official tariffs in two lists (USD and CNY), applied in the account currency; peak hours by Beijing time and the holiday calendar | official price changes need a manual update; a gateway route needs its currency set by hand; non-DeepSeek models are not priced yet |
 | 3 | State rebuilt after restart | budget resets or doubles | Spend is recomputed from the session log only; nothing is stored separately | Session-format migrations may change field availability |
 | 4 | Adapter reports no `usage` | spend silently uncounted | Marked **unattributable** and counted, never guessed; the block message reports the count | A provider that never reports usage **cannot be constrained at all** |
 | 5 | Several goals in one session | spend billed to the wrong goal | Filtered by `goalId` | The boundary turn when goals are switched |
@@ -268,6 +263,8 @@ Known, with current mitigation and what is still unsolved.
 | 11 | Client and host each compute cost | the number shown disagrees with the number that blocks | The host computes it into the projection; **the client only displays** | The client cannot read the profile default, so a denominator appears only when a session cap is set |
 | 12 | Cache hits subtracted from input | uncached input under-counted; largest error in high-hit sessions | Fixed in 0.8.1: the three input buckets are priced disjointly; regression test uses a real session's totals | — |
 | 13 | The host gate only sees request headers logged after the plugin loaded | after a restart, if the session's model has not changed, the gate treats usage as unpriced and does not count its cost | the panel's spend is rebuilt from the log and is unaffected | open: the gate should read the current route from the projection |
+| 14 | The holiday calendar is out of date | a new year's holidays are treated as workdays and billed at peak, roughly double | at startup, warn if the current year is outside the calendar | run scripts/build-holidays.py each year |
+| 15 | The account currency cannot be detected | the balance endpoint fails, or the account holds two currencies | cost is withheld with a note rather than guessed; set currency in the config | a gateway route does not use the DeepSeek balance endpoint, so its currency must be set |
 
 Number 7 is the one to watch: it fails *silently*. So does number 8. Both were found by testing behaviour rather than checking for absence of errors — the same shape as the harness's own post-mortem 0001, where 178 green tests and 100% line coverage coexisted with a completely non-functional feature.
 
@@ -275,15 +272,14 @@ Number 7 is the one to watch: it fails *silently*. So does number 8. Both were f
 
 A cache hit costs about 1/50 of an uncached input token (off-peak: $0.003 against $0.15). In a high-hit session it is still a large share of the bill: one real session had about 651M cache-hit tokens against 13.2M uncached input tokens, and with the three buckets priced disjointly, cache hits and uncached input each account for about 45% of the cost. Pricing a cache hit at the uncached rate overstates that portion about 50×.
 
-### Unit prices and peak hours
+### Currency, tariffs and peak hours
 
-The price table is a list in plugin config, looked up by **the model the session is using** (the route comes from `request/header`):
-
-- A model without a price is **not guessed**: its tokens are counted, its cost is not, and the panel lists its name (for example `a/claude-sonnet`) so you can add a price.
-- The built-in defaults cover only two official DeepSeek models (`deepseek-flash` and `deepseek-v4-pro`), from the [DeepSeek API pricing page](https://api-docs.deepseek.com/quick_start/pricing/), at the **off-peak** rate.
-- Peak hours (01:00–04:00 and 06:00–10:00 UTC, Monday to Friday) are priced at `peakMultiplier` times the off-peak rate (2 officially), judged from each usage event's own time.
-- Holidays go in `holidays`. The official rule excludes Chinese public holidays; the plugin does not update that list for you.
-- Prices match on the **model id**, not the gateway. If your gateway bills the same model differently, put its prices in `prices` and set `peakMultiplier` to 1 if it does not price by time of day.
+- **Currency follows the account, not the interface language.** On the official DeepSeek route the plugin calls the balance endpoint `GET /user/balance` once at startup with your API key and reads `balance_infos[].currency` (`CNY` or `USD`). The key comes from DSH's credentials service (reference name in `deepseekCredentialRef`); it is never written to the plugin or to logs. On a gateway route (for example AIS / Compass) the balance endpoint may not be available; set `currency` to `USD` or `CNY` directly.
+- **Tariffs are DeepSeek's official ones, in two separate lists.** The USD prices come from the English pricing page and the CNY prices from the Chinese one. They are published as separate numbers, not converted from each other. Both lists have off-peak and peak rates; the peak rate is twice the off-peak rate.
+- **Peak hours follow Beijing time.** Monday to Friday, 09:00–12:00 and 14:00–18:00 are peak. Weekends and Chinese public holidays are off-peak all day. Holidays come from holiday-cn (MIT, pinned version, see `THIRD_PARTY/holiday-cn-LICENSE`), currently covering 2025 and 2026.
+- **Legacy model names fold to their current price.** `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` are billed at the Flash price, as the official page states.
+- **A model without a price is not guessed.** Only DeepSeek is priced for now. Other models' tokens are counted, their cost is not, and the panel lists their names.
+- **No exchange rate.** Costs are computed in the account's currency and budgets are set in it: `/budget $5` for a USD account, `/budget ¥30` for a CNY account. A cost cap in the wrong currency is rejected.
 
 ---
 

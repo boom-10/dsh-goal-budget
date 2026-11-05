@@ -1,44 +1,105 @@
 /**
- * goalBudget 投影的 wire 视图必须能通过它自己的 viewSchema。
- *
- * 事故（0.4.0）：没设过 /budget 时状态是 null，view 原样返回 null，但 viewSchema 是
- * 非空对象 → DSH 读历史时 `viewSchema.parse(null)` 抛错，整个会话投影失败，
- * 每个没设预算的会话都打不开。
- *
- * 这里直接走 DSH 注册表的真实路径：init() → view() → viewSchema.parse()。
- * 任何一步抛错都说明这个投影会让读取失败。
+ * 投影的视图契约：客户端读到的形状、币种决定金额、未知币种不伪造费用、版本号。
  */
-
 import assert from 'node:assert/strict'
+import { createGoalBudgetProjection } from '../src/budget-projection.ts'
+import { digestOf } from '../src/tariff.ts'
+import { OFF_DAYS } from '../src/holiday-calendar.ts'
 
-const { createGoalBudgetProjection } = await import('../src/budget-projection.ts')
-const def = createGoalBudgetProjection()
+const bjTime = (hh: number) => Date.UTC(2026, 10, 3, hh - 8) // 2026-11-03 周二，北京时间
+const usage = { inputTokens: 13_150_225, outputTokens: 712_512, cacheReadTokens: 651_227_392, cacheWriteTokens: 0 }
+const deepseek = (time: number) => [
+  { type: 'request/header', data: { header: { config: { provider: 'deepseek', model: 'deepseek-flash' } } } },
+  { type: 'assistant/message', time, data: { turn: 1, usage } },
+]
 
-const { wire } = def
-assert.ok(wire, '❌ 投影缺 wire 视图')
+function fold(def: ReturnType<typeof createGoalBudgetProjection>, events: Array<{ type: string; time?: number; data?: unknown }>) {
+  return events.reduce((s, e) => def.apply(s, e), def.init())
+}
 
-// 1. 冷启动（没有 /budget）：DSH 会在每个会话上这样 fold 出初始值
-const initial = def.init()
-const viewed = wire.view(initial)
-assert.doesNotThrow(
-  () => wire.viewSchema.parse(viewed),
-  `❌ 没设过预算时 viewSchema 拒绝 view 的结果（${JSON.stringify(viewed)}）——所有没设预算的会话都会历史加载失败`,
-)
-assert.equal(
-  (viewed as { budget: unknown }).budget, null,
-  '❌ 没设预算时 budget 应为 null（客户端靠它判断「未设置」）',
-)
+// ── 1. 空状态：视图形状正确，且通过 viewSchema ──
+{
+  const def = createGoalBudgetProjection(() => 'USD')
+  const view = def.wire.view(def.init())
+  assert.equal(view.budget, null, '❌ 没设预算时 budget 应为 null')
+  assert.equal(view.spent.currency, 'USD')
+  assert.doesNotThrow(() => def.wire.viewSchema.parse(view), '❌ 空视图没通过 viewSchema')
+  assert.deepEqual(Object.keys(view).sort(), ['budget', 'spent'], '❌ 客户端视图不得包含内部字段（路由、桶）')
+}
 
-// 2. 设置过预算：视图是合法对象，同样必须通过
-const set = { route: null, budget: { tokens: 500_000, costUsd: 5 }, spent: { tokens: 0, costUsd: 0, unbilledTurns: 0, unpricedModels: [] } }
-assert.doesNotThrow(() => wire.viewSchema.parse(wire.view(set)), '❌ 设置预算后的视图没通过 viewSchema')
+// ── 2. 同一份用量，币种决定金额；非高峰与高峰相差 2 倍 ──
+{
+  const usd = createGoalBudgetProjection(() => 'USD')
+  const off = usd.wire.view(fold(usd, deepseek(bjTime(12))))
+  assert.ok(Math.abs(off.spent.costUsd - 4.353723) < 1e-5, `❌ 美元非高峰应为 $4.3537，得到 ${off.spent.costUsd}`)
+  assert.equal(off.spent.currency, 'USD')
 
-// 3. 非法值仍被拒绝（说明 schema 没有被放成「什么都收」）
-assert.throws(() => wire.viewSchema.parse({ budget: { tokens: -1, costUsd: 1 }, spent: { tokens: 0, costUsd: 0, unbilledTurns: 0, unpricedModels: [] } }), '❌ 非法形状应被拒绝')
-assert.throws(() => wire.viewSchema.parse({ budget: null, spent: { tokens: 0, costUsd: 0, unbilledTurns: 0, unpricedModels: [] }, extra: 1 }), '❌ 多余字段应被拒绝（strict）')
-assert.throws(() => wire.viewSchema.parse('not-an-object'), '❌ 非对象应被拒绝')
+  const peak = usd.wire.view(fold(usd, deepseek(bjTime(10))))
+  assert.ok(Math.abs(peak.spent.costUsd - 2 * 4.353723) < 1e-4, '❌ 北京时间 10:00（高峰）应为非高峰的 2 倍')
 
-console.log('✅ projection-view.spec.ts 全部通过（3 组断言）')
-console.log('   - 未设预算（budget: null）的视图通过 viewSchema')
-console.log('   - 设置后的视图通过 viewSchema')
-console.log('   - 非法形状仍被拒绝')
+  const cny = createGoalBudgetProjection(() => 'CNY')
+  const cnyView = cny.wire.view(fold(cny, deepseek(bjTime(12))))
+  assert.ok(Math.abs(cnyView.spent.costUsd - 29.02482) < 1e-4, `❌ 人民币非高峰应为 ¥29.0248，得到 ${cnyView.spent.costUsd}`)
+  assert.equal(cnyView.spent.currency, 'CNY')
+  // 同一份日志，token 不随币种变化
+  assert.equal(cnyView.spent.tokens, off.spent.tokens, '❌ token 不应随币种改变')
+}
+
+// ── 3. 币种未知：费用为 0、币种为 null，但 token 照常计入（不伪造金额）──
+{
+  const def = createGoalBudgetProjection(() => undefined)
+  const view = def.wire.view(fold(def, deepseek(bjTime(12))))
+  assert.equal(view.spent.costUsd, 0, '❌ 币种未知时不得伪造费用')
+  assert.equal(view.spent.currency, null)
+  assert.ok(view.spent.tokens > 0, '❌ token 仍应计入')
+}
+
+// ── 4. 不能计价的模型：列出名字，费用不计，token 计入 ──
+{
+  const def = createGoalBudgetProjection(() => 'USD')
+  const s = fold(def, [
+    { type: 'request/header', data: { header: { config: { provider: 'gateway', model: 'claude-sonnet' } } } },
+    { type: 'assistant/message', time: bjTime(12), data: { turn: 1, usage } },
+  ])
+  const view = def.wire.view(s)
+  assert.deepEqual([...view.spent.unpricedModels], ['gateway/claude-sonnet'], '❌ 应列出不能计价的模型')
+  assert.equal(view.spent.costUsd, 0, '❌ 不能计价的模型不得算费用')
+  assert.ok(view.spent.tokens > 0)
+}
+
+// ── 5. 没有用量的轮次：记为不可归因，不猜 ──
+{
+  const def = createGoalBudgetProjection(() => 'USD')
+  const view = def.wire.view(fold(def, [{ type: 'assistant/message', time: bjTime(12), data: { turn: 1 } }]))
+  assert.equal(view.spent.unbilledTurns, 1, '❌ 缺 usage 的轮次应计入 unbilledTurns')
+}
+
+// ── 6. /budget：金额带币种；off 清除 ──
+{
+  const def = createGoalBudgetProjection(() => 'CNY')
+  const set = fold(def, [{ type: 'command/run', data: { name: 'budget', args: '¥30' } }])
+  assert.deepEqual(def.wire.view(set).budget, { tokens: 0, costUsd: 30, costCurrency: 'CNY' }, '❌ ¥30 应记为人民币上限')
+  const cleared = def.apply(set, { type: 'command/run', data: { name: 'budget', args: 'off' } })
+  assert.equal(def.wire.view(cleared).budget, null, '❌ off 应清除上限')
+}
+
+// ── 7. 框架契约：不关心的事件必须返回同一个引用 ──
+{
+  const def = createGoalBudgetProjection()
+  const s = def.init()
+  assert.equal(def.apply(s, { type: 'turn/start', data: { turn: 1 } }), s, '❌ 不关心的事件必须返回同一个引用')
+}
+
+// ── 8. 严格模式：多余字段被拒绝 ──
+{
+  const def = createGoalBudgetProjection()
+  assert.throws(() => def.wire.viewSchema.parse({ ...def.wire.view(def.init()), extra: 1 }), '❌ 多余字段应被拒绝')
+}
+
+// ── 9. 版本号：绑定官方日历的内容，日历变了旧缓存必须重建 ──
+{
+  const def = createGoalBudgetProjection()
+  assert.equal(def.stateVersion, 6_000_000 + digestOf(OFF_DAYS.join(',')), '❌ 版本号应绑定日历内容')
+}
+
+console.log('✅ projection-view.spec.ts 全部通过（9 组断言）')
