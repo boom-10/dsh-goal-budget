@@ -141,7 +141,7 @@ type Ctx = {
   on: (event: string, listener: (...args: never[]) => void) => void
   logger: { warn: (msg: string) => void; info: (msg: string) => void }
   get: (name: string) => unknown
-  goals: { get: (agent: unknown) => { id: string; revision: number } | undefined; block: (agent: unknown, ref: unknown, reason: { code: string; message: string }) => unknown }
+  goals: { get: (agent: unknown) => { id: string; revision: number; phase: 'active' | 'paused' | 'blocked' | 'complete' } | undefined; block: (agent: unknown, ref: unknown, reason: { code: string; message: string }) => unknown }
 }
 
 /**
