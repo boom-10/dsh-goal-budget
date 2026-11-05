@@ -325,7 +325,7 @@ node --experimental-strip-types scripts/replay.ts /tmp/s.jsonl USD
 
 ```sh
 npm run typecheck   # tsc
-npm test            # 5 个 spec，不需要 API key
+npm test            # 11 个 spec，不需要 API key
 npm run build       # esbuild 打包 → lib/index.js
 ```
 
@@ -333,15 +333,21 @@ npm run build       # esbuild 打包 → lib/index.js
 
 其中两个变异**最初是漏网的** —— 测试从没喂过 `k` 后缀，也从没喂过非零的 `cacheReadTokens`。`test/accounting.spec.ts` 和 `budget-command.spec.ts` 里的后缀用例就是这么来的。
 
-5 个 spec 各管一件事：
+11 个 spec 各管一件事：
 
 | Spec | 管什么 |
 | --- | --- |
 | `loader.spec.ts` | 导出形状（走真实的 `unwrapExports` 语义）|
 | `budget-command.spec.ts` | `/budget` 处理器；**会话覆盖真的改变了阻断阈值**；清除后不再误触发；一个目标不会被阻断两次 |
-| `accounting.spec.ts` | 计价与判定；缓存从输入扣掉且不会变负；「谁先到算谁」两个方向 |
-| `projection-view.spec.ts` | 投影的 `wire` 视图能通过它自己的 `viewSchema`（**0.4.0 的事故**：非空 schema 让每个没设预算的会话历史加载失败）|
-| `client-pill.spec.ts` | 浏览器半边：读对层级、走 portal、点得开、文案走字典 |
+| `budget-currency.spec.ts` | 人民币金额的写法（`¥30` · `30元` · `cny30`）、符号显示、「金额只能写一次」 |
+| `accounting.spec.ts` | 计价的会计部分：三个输入桶并列、缓存写入按未命中价、推理不重复计费、「谁先到算谁」 |
+| `tariff.spec.ts` | 官方价目与峰谷：北京时间窗口边界、周末与法定节假日、模型别名与网关前缀、真实会话的金额 |
+| `currency-detect.spec.ts` | 账户币种识别：人民币 / 美元 / 两种并存 / 空余额 / 非 2xx；错误信息不含 API Key |
+| `projection-view.spec.ts` | 投影的 `wire` 视图能通过它自己的 `viewSchema`（**0.4.0 的事故**）；币种决定金额、币种未知不伪造、不计价的模型被列出 |
+| `host-currency.spec.ts` | 宿主级：币种不符的费用上限被 `/budget` 拒绝 |
+| `host-session-budget.spec.ts` | 宿主级：**profile 无默认预算、仅用 `/budget` 时也能记账并阻断**；路由回退；不重复阻断；无路由时不伪造费用 |
+| `wallclock.spec.ts` | 时间维度：单位解析、各轮跨度求和、跨天的空闲不计入、预算判定 |
+| `client-pill.spec.ts` | 浏览器半边：读对层级、走 portal、点得开、文案走字典、未计价模型与币种未知的提示 |
 
 ### 两件值得单独说的事
 

@@ -312,19 +312,27 @@ This replay caught a bug the synthetic tests missed: the gateway separates with 
 
 ```sh
 npm run typecheck   # tsc
-npm test            # five specs; no API key needed
+npm test            # 11 specs; no API key needed
 npm run build       # esbuild bundle → lib/index.js
 ```
 
 The suite is checked by mutation, not just by passing: reintroducing either pricing bug, dropping the `nullable()` a wire view needs, or reverting the panel's portal turns it red. Several of those mutations originally survived — the tests had never exercised a `k` suffix, a non-zero `cacheReadTokens`, or a hardcoded label — which is how the extra cases came to exist.
 
+11 specs, each guarding one thing:
+
 | Spec | Covers |
 | --- | --- |
 | `loader.spec.ts` | export shape, through the real `unwrapExports` semantics |
 | `budget-command.spec.ts` | the `/budget` handler; a session override **actually changes the blocking threshold**; clearing stops blocking; one goal is never blocked twice |
-| `accounting.spec.ts` | pricing and the gate; cache subtracted from input and never negative; both directions of "whichever is reached first wins" |
-| `projection-view.spec.ts` | the projection's `wire` view passes its own `viewSchema` (the 0.4.0 incident: a non-nullable schema made every session without a budget fail to load) |
-| `client-pill.spec.ts` | the browser half: reads the right level, portals, opens on click, and takes its copy from the dictionary |
+| `budget-currency.spec.ts` | CNY amount forms (`¥30`, `30元`, `cny30`), symbol rendering, and "the amount may be written once" |
+| `accounting.spec.ts` | the arithmetic: three disjoint input buckets, cache writes at the miss rate, reasoning not billed twice, both directions of "whichever is reached first wins" |
+| `tariff.spec.ts` | the official tariffs and peak windows: Beijing-time boundaries, weekends and public holidays, model aliases and gateway prefixes, a real session's amounts |
+| `currency-detect.spec.ts` | account-currency detection: CNY / USD / both / empty / non-2xx, and that the error text never contains the key |
+| `projection-view.spec.ts` | the projection's `wire` view passes its own `viewSchema` (the 0.4.0 incident); currency decides the amount, an unknown currency is not faked, unpriced models are named |
+| `host-currency.spec.ts` | host level: `/budget` rejects a cost cap in the wrong currency |
+| `host-session-budget.spec.ts` | host level: **with no profile default, a `/budget`-only session still accounts and blocks**; route fallback; no double block; no fabricated cost without a route |
+| `wallclock.spec.ts` | the time dimension: unit parsing, summed turn spans, idle time across days excluded, budget verdicts |
+| `client-pill.spec.ts` | the browser half: reads the right level, portals, opens on click, takes its copy from the dictionary, and notes unpriced models or an unknown currency |
 
 ### Two things worth calling out
 
