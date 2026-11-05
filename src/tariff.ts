@@ -51,18 +51,68 @@ export const DEEPSEEK_TARIFFS: Readonly<Record<Currency, Readonly<Record<Canonic
   },
 }
 
-/** 官方说明：旧模型名仍可调用，按 Flash 价格计费。 */
-const ALIASES: Readonly<Record<string, CanonicalModel>> = {
+/**
+ * 内置别名。
+ *
+ * - 官方模型名与官方说明的旧名（`deepseek-v4-flash`、`deepseek-v4-flash-vision-exp`
+ *   仍可调用，按 Flash 价格计费）。
+ * - 官方模型版本名 `V4.1-Flash` 的常见写法：网关常拿它当模型 id。
+ */
+const BUILTIN_ALIASES: Readonly<Record<string, CanonicalModel>> = {
   'deepseek-flash': 'deepseek-flash',
   'deepseek-v4-flash': 'deepseek-flash',
   'deepseek-v4-flash-vision-exp': 'deepseek-flash',
+  'deepseek-v4.1-flash': 'deepseek-flash',
+  'deepseek-v4.1-flash-vision-exp': 'deepseek-flash',
   'deepseek-v4-pro': 'deepseek-v4-pro',
+  'deepseek-v4.1-pro': 'deepseek-v4-pro',
 }
 
-/** 路由里的模型名映射到计价模型；不认识的返回 undefined，调用方不得用别的模型顶替。 */
-export function canonicalDeepSeekModel(id: string | undefined): CanonicalModel | undefined {
-  if (id === undefined || !Object.prototype.hasOwnProperty.call(ALIASES, id)) return undefined
-  return ALIASES[id]
+/** 可计价的模型名 —— 配置里的别名只能指向其中之一。 */
+export const CANONICAL_MODELS: readonly CanonicalModel[] = ['deepseek-flash', 'deepseek-v4-pro']
+
+/** 用户配置的模型别名：日志里的模型名 → 计价模型。 */
+export type ModelAliases = Readonly<Record<string, CanonicalModel>>
+
+/**
+ * 网关的命名分隔符。实测真实会话里出现过两种：`供应商/模型` 与 `网关--模型`。
+ * 冒号也一并支持（`provider:model` 是常见写法）。
+ */
+const SEPARATORS: readonly string[] = ['/', '--', ':']
+
+/**
+ * 取最后一个分隔符之后的部分。
+ *
+ * `cm-ais/deepseek-v4.1-flash` → `deepseek-v4.1-flash`
+ * `ais/llm-gateway--deepseek-v4-flash` → `deepseek-v4-flash`（真实会话里的写法）
+ */
+function lastSegment(id: string): string {
+  let end = -1
+  for (const sep of SEPARATORS) {
+    const at = id.lastIndexOf(sep)
+    if (at !== -1) end = Math.max(end, at + sep.length - 1)
+  }
+  return end === -1 ? id : id.slice(end + 1)
+}
+
+/**
+ * 路由里的模型名映射到计价模型。
+ *
+ * 依次尝试：原始名字 → 去掉供应商前缀 → 大小写不敏感。配置的别名优先于内置别名。
+ * 都不认识时返回 undefined —— 调用方**不得**用别的模型的价格顶替（失败模式 #2）。
+ *
+ * @param id - `request/header` 里的模型 id，可以是带前缀的网关名字。
+ * @param aliases - 用户配置的别名表，可覆盖内置。
+ */
+export function canonicalDeepSeekModel(id: string | undefined, aliases: ModelAliases = {}): CanonicalModel | undefined {
+  if (id === undefined || id.length === 0) return undefined
+  for (const name of [id, lastSegment(id)]) {
+    for (const key of name === name.toLowerCase() ? [name] : [name, name.toLowerCase()]) {
+      if (Object.prototype.hasOwnProperty.call(aliases, key)) return aliases[key]
+      if (Object.prototype.hasOwnProperty.call(BUILTIN_ALIASES, key)) return BUILTIN_ALIASES[key]
+    }
+  }
+  return undefined
 }
 
 const BEIJING_OFFSET_MS = 8 * 3_600_000

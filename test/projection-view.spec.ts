@@ -83,6 +83,28 @@ function fold(def: ReturnType<typeof createGoalBudgetProjection>, events: Array<
   assert.equal(def.wire.view(cleared).budget, null, '❌ off 应清除上限')
 }
 
+// ── 6b. 网关线路：模型名带 `供应商/` 前缀，去掉前缀后按 Flash 计价 ──
+{
+  const def = createGoalBudgetProjection(() => 'USD')
+  const s = fold(def, [
+    { type: 'request/header', data: { header: { config: { provider: 'magpie-responses', model: 'cm-ais/deepseek-v4.1-flash' } } } },
+    { type: 'assistant/message', time: bjTime(12), data: { turn: 1, usage } },
+  ])
+  const view = def.wire.view(s)
+  assert.ok(Math.abs(view.spent.costUsd - 4.353723) < 1e-5, `❌ 带前缀的网关模型应能计价，得到 ${view.spent.costUsd}`)
+  assert.deepEqual([...view.spent.unpricedModels], [], '❌ 不应列为不计价')
+}
+
+// ── 6c. 别名表能覆盖网关的自定义名字 ──
+{
+  const def = createGoalBudgetProjection(() => 'USD', { 'vendor/my-flash': 'deepseek-flash' })
+  const s = fold(def, [
+    { type: 'request/header', data: { header: { config: { provider: 'gateway', model: 'vendor/my-flash' } } } },
+    { type: 'assistant/message', time: bjTime(12), data: { turn: 1, usage } },
+  ])
+  assert.ok(def.wire.view(s).spent.costUsd > 0, '❌ 别名应让自定义模型名可计价')
+}
+
 // ── 7. 框架契约：不关心的事件必须返回同一个引用 ──
 {
   const def = createGoalBudgetProjection()

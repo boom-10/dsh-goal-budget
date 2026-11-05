@@ -53,6 +53,7 @@ mod.apply(ctx as never, {
   budget: { tokens: 0, costUsd: 1, wallClockMs: 0 },
   currency: 'USD',
   deepseekCredentialRef: 'DEEPSEEK_API_KEY',
+  modelAliases: {},
   onExceed: 'block',
   warnAtRatio: 0.8,
 })

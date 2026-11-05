@@ -39,6 +39,8 @@ declare module '@deepseek-ai/schemastery' {
     const<T extends string | number | boolean>(value: T): Schema<T>
     /** 出处：node_modules/@deepseek-ai/schemastery/lib/types/index.d.ts:72 —— 元素匹配 inner 的数组。 */
     array<X extends Schema<unknown>>(inner: X): Schema<Infer<X>[]>
+    /** 出处：node_modules/@deepseek-ai/schemastery/lib/types/index.d.ts:74 —— 值为 inner 的对象字典。 */
+    dict<X extends Schema<unknown>>(inner: X): Schema<Record<string, Infer<X>>>
   }
 
   const z: Schemastery

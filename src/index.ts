@@ -21,7 +21,7 @@ import {
   type GoalSpend, type Pricing, type TurnSpend,
 } from './accounting.ts'
 import { detectAccountCurrency, type CredentialsService } from './currency-detect.ts'
-import { bandAt, calendarCovers, canonicalDeepSeekModel, ratesFor, type Band, type CanonicalModel, type Currency } from './tariff.ts'
+import { bandAt, calendarCovers, canonicalDeepSeekModel, ratesFor, type Band, type CanonicalModel, type Currency, type ModelAliases } from './tariff.ts'
 import {
   describeBudget, formatDuration, formatTokens, formatUsd, isUnlimited,
   parseBudgetCommand, renderBudget, type Budget,
@@ -51,6 +51,12 @@ export const Config = z.object({
   currency: z.union([z.const('auto'), z.const('USD'), z.const('CNY')]).default('auto'),
   /** 凭据服务里 DeepSeek API Key 的引用名（与 DeepSeek 路由使用的名字一致）。 */
   deepseekCredentialRef: z.string().default('DEEPSEEK_API_KEY'),
+  /**
+   * 模型别名：日志里的模型名 → 计价模型。网关给模型加前缀或改名时用。
+   * 例：`cm-ais/deepseek-v5-flash: deepseek-flash`。
+   * 插件已内置官方名、官方旧名，以及「去掉 `供应商/` 前缀」的匹配，多数网关无需配置。
+   */
+  modelAliases: z.dict(z.union([z.const('deepseek-flash'), z.const('deepseek-v4-pro')])).default({}),
   /** 超预算时的动作。`block` 会调 ctx.goals.block() 并自动 disarm。 */
   onExceed: z.union([z.const('block'), z.const('warn')]).default('block'),
   /** 达到该比例时注入一次提醒（0–1）。0 = 不提醒。 */
@@ -62,6 +68,7 @@ export interface GoalBudgetConfig {
   budget: { tokens: number; costUsd: number; wallClockMs: number }
   currency: 'auto' | Currency
   deepseekCredentialRef: string
+  modelAliases: ModelAliases
   onExceed: 'block' | 'warn'
   warnAtRatio: number
 }
@@ -209,7 +216,7 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
    * 顺带让「重启后预算还在」成立：日志里有 `/budget` 事件，状态就能重建。
    */
   // 单价与宿主 Config 同源 —— 客户端显示的数就是阻断判定用的数。
-  const projectionHandle = ctx.sessionProjections.register(createGoalBudgetProjection(() => currency))
+  const projectionHandle = ctx.sessionProjections.register(createGoalBudgetProjection(() => currency, config.modelAliases))
   // register 可能是异步的；失败不能拖垮插件加载（postmortem 0001 的教训：
   // 加载期的异常会让整个 fiber 失败）。
   void Promise.resolve(projectionHandle).catch((error: unknown) => {
@@ -358,7 +365,7 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
       // 这里补开这一轮，否则 startedAt 会一直是 undefined，时长恒为 0。
       const opened = at === undefined ? prev : openRound(prev, at)
       const route = routeBySession.get(session)
-      const model = canonicalDeepSeekModel(route?.model)
+      const model = canonicalDeepSeekModel(route?.model, config.modelAliases)
       const pricing = model === undefined || currency === undefined || at === undefined
         ? undefined
         : pricingOf(model, currency, bandAt(at))

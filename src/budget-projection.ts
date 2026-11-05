@@ -9,7 +9,7 @@ import { z } from 'zod'
 import { billedTokensOf, type TokenUsage } from './accounting.ts'
 import { parseBudgetCommand } from './budget-command.ts'
 import { OFF_DAYS } from './holiday-calendar.ts'
-import { bandAt, canonicalDeepSeekModel, costOfTariff, digestOf, ratesFor, type Band, type CanonicalModel, type Currency } from './tariff.ts'
+import { bandAt, canonicalDeepSeekModel, costOfTariff, digestOf, ratesFor, type Band, type CanonicalModel, type Currency, type ModelAliases } from './tariff.ts'
 
 /** 客户端读到的形状。 */
 export interface GoalBudgetView {
@@ -135,8 +135,12 @@ function viewOf(state: GoalBudgetState, currency: Currency | undefined): GoalBud
  * 构造投影定义。
  *
  * @param getCurrency - 当前账户币种；尚未识别时返回 undefined。读取视图时调用。
+ * @param aliases - 模型别名表；必须与宿主用同一份，否则两边的计价会分歧。
  */
-export function createGoalBudgetProjection(getCurrency: () => Currency | undefined = () => undefined) {
+export function createGoalBudgetProjection(
+  getCurrency: () => Currency | undefined = () => undefined,
+  aliases: ModelAliases = {},
+) {
   return {
     key: 'goalBudget',
     stateSchema,
@@ -185,7 +189,7 @@ export function createGoalBudgetProjection(getCurrency: () => Currency | undefin
           return { ...state, unbilledTurns: state.unbilledTurns + 1 }
         }
         const tokens = state.tokens + billedTokensOf(usage)
-        const model = canonicalDeepSeekModel(state.route?.model)
+        const model = canonicalDeepSeekModel(state.route?.model, aliases)
         if (model === undefined) {
           // 不是可计价的模型：token 计入，费用不计，并列出模型名。不用别的模型的价格去猜。
           return { ...state, tokens, unpricedModels: addUnpriced(state.unpricedModels, routeKey(state.route)) }

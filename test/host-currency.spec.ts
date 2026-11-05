@@ -24,6 +24,7 @@ const config = {
   budget: { tokens: 0, costUsd: 0, wallClockMs: 0 },
   currency: 'USD' as const,
   deepseekCredentialRef: 'DEEPSEEK_API_KEY',
+  modelAliases: {},
   onExceed: 'block' as const,
   warnAtRatio: 0.8,
 }

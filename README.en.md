@@ -157,6 +157,7 @@ Click it for the breakdown (built from the host's own primitives, so its look, k
     warnAtRatio: 0.8
     currency: auto                       # auto: detect via the DeepSeek balance endpoint (official route); write USD or CNY for a gateway
     deepseekCredentialRef: DEEPSEEK_API_KEY   # reference name of the key in the credentials service
+    modelAliases: {}                     # map a renamed gateway model, e.g. cm-ais/deepseek-v5-flash: deepseek-flash
 ```
 
 Why both layers: a budget is a **runtime decision** — it changes per session — while plugin config is a **deployment decision** read at boot. Putting the budget only in config forces a restart to change something you decide in the moment.
@@ -277,9 +278,31 @@ A cache hit costs about 1/50 of an uncached input token (off-peak: $0.003 agains
 - **Currency follows the account, not the interface language.** On the official DeepSeek route the plugin calls the balance endpoint `GET /user/balance` once at startup with your API key and reads `balance_infos[].currency` (`CNY` or `USD`). The key comes from DSH's credentials service (reference name in `deepseekCredentialRef`); it is never written to the plugin or to logs. On a gateway route (for example AIS / Compass) the balance endpoint may not be available; set `currency` to `USD` or `CNY` directly.
 - **Tariffs are DeepSeek's official ones, in two separate lists.** The USD prices come from the English pricing page and the CNY prices from the Chinese one. They are published as separate numbers, not converted from each other. Both lists have off-peak and peak rates; the peak rate is twice the off-peak rate.
 - **Peak hours follow Beijing time.** Monday to Friday, 09:00–12:00 and 14:00–18:00 are peak. Weekends and Chinese public holidays are off-peak all day. Holidays come from holiday-cn (MIT, pinned version, see `THIRD_PARTY/holiday-cn-LICENSE`), currently covering 2025 and 2026.
+- **A gateway prefix is stripped automatically.** A model id like `cm-ais/deepseek-v4.1-flash` matches the built-in tariff after the `vendor/` prefix is removed; a renamed model needs one `modelAliases` line rather than a plugin release.
 - **Legacy model names fold to their current price.** `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` are billed at the Flash price, as the official page states.
 - **A model without a price is not guessed.** Only DeepSeek is priced for now. Other models' tokens are counted, their cost is not, and the panel lists their names.
 - **No exchange rate.** Costs are computed in the account's currency and budgets are set in it: `/budget $5` for a USD account, `/budget ¥30` for a CNY account. A cost cap in the wrong currency is rejected.
+
+### Verifying against a real session log
+
+The unit tests use synthetic events; `scripts/replay.ts` replays a log your machine actually produced:
+
+```sh
+# Session logs are zstd-compressed (system Python 3.14+ decompresses them)
+python3 -c "from compression import zstd, pathlib; p = pathlib.Path('<session dir>/session.jsonl.zstd'); pathlib.Path('/tmp/s.jsonl').write_bytes(zstd.decompress(p.read_bytes()))"
+node --experimental-strip-types scripts/replay.ts /tmp/s.jsonl USD
+```
+
+One real session (42,074 events, 1,715 usage records, 3 routes) replays to:
+
+| Metric | Value |
+|---|---|
+| Total tokens | 665,090,129 (identical to DSH's own projection cache) |
+| Cost | $6.6252 · ¥44.1681 |
+| Peak-hour usage | 418,573,609 tokens (about 64%, billed at 2x) |
+| Unpriced model | `ais/llm-gateway--kimi-k3` (not DeepSeek; 11,044,122 tokens left unpriced) |
+
+This replay caught a bug the synthetic tests missed: the gateway separates with `--` (`ais/llm-gateway--deepseek-v4-flash`), while the plugin only stripped a `vendor/` prefix, so **the whole session priced at $0**. After the fix it is $6.6252; the gap from the flat off-peak estimate of $4.35 in 0.8.1 is exactly the peak-hours share billed at 2x.
 
 ---
 

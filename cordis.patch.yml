@@ -8,10 +8,10 @@
       config:
         budget:
           tokens: 0            # 0 = 不限制
-          costUsd: 0
-        pricing:
-          inputPerMillion: 0.15
-          outputPerMillion: 0.60
-          cacheReadPerMillion: 0.003   # ★ 比未命中便宜 50 倍，必须区分
+          costUsd: 0           # 单位见 currency
+          wallClockMs: 0
+        currency: auto         # auto = 用 DeepSeek 余额接口识别（官方线路）；网关线路写 USD 或 CNY
+        deepseekCredentialRef: DEEPSEEK_API_KEY
+        modelAliases: {}       # 网关给模型改名时在此映射，例如 cm-ais/deepseek-v5-flash: deepseek-flash
         onExceed: block
         warnAtRatio: 0.8

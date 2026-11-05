@@ -60,6 +60,24 @@ const weekdayOf = (y: number, mo: number, d: number) => new Date(Date.UTC(y, mo 
   assert.equal(canonicalDeepSeekModel(undefined), undefined)
 }
 
+// ── 4b. 网关前缀：去掉 `供应商/` 再匹配；用户别名优先；路由组合名不得误判 ──
+{
+  assert.equal(canonicalDeepSeekModel('cm-ais/deepseek-v4.1-flash'), 'deepseek-flash', '❌ 去掉供应商前缀后应能识别')
+  assert.equal(canonicalDeepSeekModel('deepseek-v4.1-flash'), 'deepseek-flash', '❌ 官方版本名 V4.1-Flash 应识别')
+  assert.equal(canonicalDeepSeekModel('cm-ais/deepseek-v4-pro'), 'deepseek-v4-pro')
+  assert.equal(canonicalDeepSeekModel('cm-ais/deepseek-flash'), 'deepseek-flash', '❌ 带前缀的官方名应识别')
+  assert.equal(canonicalDeepSeekModel('group/smart-split'), undefined, '❌ 路由组合名不得算成 DeepSeek')
+  assert.equal(canonicalDeepSeekModel('my-flash', { 'my-flash': 'deepseek-flash' }), 'deepseek-flash', '❌ 用户别名应生效')
+  assert.equal(canonicalDeepSeekModel('MY-FLASH', { 'my-flash': 'deepseek-flash' }), 'deepseek-flash', '❌ 别名匹配应大小写不敏感')
+  assert.equal(canonicalDeepSeekModel('deepseek-flash', { 'deepseek-flash': 'deepseek-v4-pro' }), 'deepseek-v4-pro', '❌ 用户别名应优先于内置')
+  assert.equal(canonicalDeepSeekModel('cm-ais/other-model', { 'cm-ais/other-model': 'deepseek-v4-pro' }), 'deepseek-v4-pro', '❌ 带前缀的别名应生效')
+  // ★ 真实会话（session-2d3becaf）里出现过的三种路由写法
+  assert.equal(canonicalDeepSeekModel('ais/llm-gateway--deepseek-v4-flash'), 'deepseek-flash', '❌ 网关用 -- 分隔时应识别')
+  assert.equal(canonicalDeepSeekModel('deepseek-official/deepseek-v4-flash'), 'deepseek-flash', '❌ 官方线路的前缀写法应识别')
+  assert.equal(canonicalDeepSeekModel('ais/llm-gateway--kimi-k3'), undefined, '❌ 网关上的非 DeepSeek 模型不得计价')
+  assert.equal(canonicalDeepSeekModel('vendor:deepseek-v4-pro'), 'deepseek-v4-pro', '❌ 冒号分隔应识别')
+}
+
 // ── 5. 官方价目：峰值 = 空闲价的 2 倍（官方脚注），数值与官方页面一致 ──
 {
   assert.deepEqual(ratesFor('deepseek-flash', 'CNY', 'offPeak'), { cacheHit: 0.02, cacheMiss: 1, output: 4 })

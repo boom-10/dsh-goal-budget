@@ -148,6 +148,7 @@ dsh plugin --profile desktop add github:boom-10/dsh-goal-budget
     warnAtRatio: 0.8
     currency: auto                       # auto：用 DeepSeek 余额接口识别（官方线路）；网关线路写 USD 或 CNY
     deepseekCredentialRef: DEEPSEEK_API_KEY   # 凭据服务里的 Key 引用名
+    modelAliases: {}                     # 网关给模型改名时映射，例如 cm-ais/deepseek-v5-flash: deepseek-flash
 ```
 
 **为什么坚持做两层：** 预算是**运行时决策**（每个会话都可能不同），而插件配置是**部署决策**（启动时读取）。把预算只放在配置里，意味着为了改一个你当场决定的值要重启应用。
@@ -290,9 +291,31 @@ block(agent: Agent, ref: GoalRef, reason: GoalBlockReason): GoalView
 - **币种按账户决定，不按界面语言。** DeepSeek 官方线路：启动时用你的 API Key 调余额接口 `GET /user/balance`，读取 `balance_infos[].currency`（`CNY` 或 `USD`）自动识别。Key 从 DSH 的凭据服务读取（引用名见 `deepseekCredentialRef`），不写进插件，也不写日志。网关线路（如 AIS / Compass）的余额接口不一定可用，请在 `currency` 里直接写 `USD` 或 `CNY`。
 - **价目是 DeepSeek 官方的，美元与人民币两套分开。** 美元价来自英文官方页面，人民币价来自中文官方页面，是各自公布的数字，不是汇率换算的结果。两者都有空闲价与高峰价，高峰价是空闲价的 2 倍。
 - **峰谷时段按北京时间。** 周一至周五 9:00–12:00、14:00–18:00 为高峰；周末与法定节假日全天为空闲。节假日来自 holiday-cn（MIT 许可，固定版本，见 `THIRD_PARTY/holiday-cn-LICENSE`），目前覆盖 2025 和 2026 年。
+- **网关前缀自动去掉。** 模型 id 形如 `cm-ais/deepseek-v4.1-flash` 时，会先去掉 `供应商/` 前缀再匹配内置价目；改名过的模型用 `modelAliases` 映射一条即可，不必等插件发版。
 - **旧模型名按官方说明折叠。** `deepseek-v4-flash` 与 `deepseek-v4-flash-vision-exp` 按 Flash 价格计费。
 - **不计价的模型不猜。** 目前只支持 DeepSeek；其它模型的 token 照常计入，费用不计，并在面板里列出它的名字。
 - **没有汇率。** 费用按账户币种直接算，预算也按账户币种设：美元账户用 `/budget $5`，人民币账户用 `/budget ¥30`。币种不符的费用上限会被拒绝。
+
+### 用真实会话日志回放验证
+
+单元测试用的是合成事件；`scripts/replay.ts` 用的是你机器上真实跑过的日志：
+
+```sh
+# 会话日志是 zstd 压缩的（系统 Python 3.14+ 自带解压）
+python3 -c "from compression import zstd, pathlib; p = pathlib.Path('<会话目录>/session.jsonl.zstd'); pathlib.Path('/tmp/s.jsonl').write_bytes(zstd.decompress(p.read_bytes()))"
+node --experimental-strip-types scripts/replay.ts /tmp/s.jsonl USD
+```
+
+一个真实会话（42,074 条事件 · 1,715 条用量 · 3 条路由）的回放结果：
+
+| 指标 | 值 |
+|---|---|
+| token 合计 | 665,090,129（与 DSH 自己的投影缓存逐位一致） |
+| 费用 | $6.6252 · ¥44.1681 |
+| 高峰时段用量 | 418,573,609 token（约占 64%，按 2 倍计价） |
+| 不计价的模型 | `ais/llm-gateway--kimi-k3`（非 DeepSeek，11,044,122 token 未计价） |
+
+这个回放抓到一个合成测试漏掉的 bug：网关用 `--` 作分隔符（`ais/llm-gateway--deepseek-v4-flash`），而插件原先只认 `供应商/` 前缀，导致**整段会话费用算成 $0**。修好之后是 $6.6252；与 0.8.1 按「全部非高峰」估的 $4.35 之间的差距，正是高峰时段按 2 倍计价的部分。
 
 ---
 
