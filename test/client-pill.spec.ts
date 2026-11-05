@@ -471,6 +471,22 @@ const view = (k: string) => (k === 'goalBudget' ? HOSTED : undefined)
   assert.match(text, /466\.23m|466\.2m/, `❌ 应显示该模型的 token：${text}`)
 }
 
+// ── 15. 面板宽度必须等于它的上限 ──
+//     钩子在「隐藏但参与布局」的首帧测量尺寸，随后才定位。若宽度由内容决定（max-content）
+//     而 maxWidth 又把它压窄，测量值与最终值就不一致：align:'end' 的右缘会短一截、
+//     上边距也会偏大（OBSERVED 的截图）。所以 width 与 maxWidth 必须取同一个值。
+{
+  remount()
+  activeLocale = 'en'
+  clickPill(render(Pill, { useProjection: () => null }) as El)
+  const opened = render(Pill, { useProjection: () => ({ budget: null, spent: { tokens: 1, costUsd: 0.01, currency: 'USD', unbilledTurns: 0, unpricedModels: [], models: [] } }) }) as El
+  const panel = findEl(opened, n => n.props['role'] === 'dialog')
+  assert.ok(panel, '❌ 找不到面板')
+  const style = (panel.props['style'] ?? {}) as Record<string, unknown>
+  assert.equal(style['width'], style['maxWidth'], `❌ 面板宽度必须等于上限，否则测量值与渲染值不符：${String(style['width'])} vs ${String(style['maxWidth'])}`)
+  assert.notEqual(style['width'], 'max-content', '❌ 不能用 max-content 定宽')
+}
+
 console.log('✅ client-pill.spec.ts 全部通过（13 组断言）')
 console.log('   - 显示宿主给的数，不自己重算')
 console.log('   - 用宿主的 Pill 原语，带 onClick / aria-haspopup / aria-expanded')
