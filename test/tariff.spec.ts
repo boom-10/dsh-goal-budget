@@ -3,7 +3,7 @@
  */
 import assert from 'node:assert/strict'
 import {
-  bandAt, calendarCovers, canonicalDeepSeekModel, costOfTariff, DEEPSEEK_TARIFFS, digestOf, ratesFor,
+  bandAt, bandFor, calendarCovers, canonicalDeepSeekModel, costOfTariff, DEEPSEEK_TARIFFS, digestOf, ratesFor,
 } from '../src/tariff.ts'
 import { COVERED_YEARS, HOLIDAY_SOURCE, OFF_DAYS } from '../src/holiday-calendar.ts'
 
@@ -76,6 +76,15 @@ const weekdayOf = (y: number, mo: number, d: number) => new Date(Date.UTC(y, mo 
   assert.equal(canonicalDeepSeekModel('deepseek-official/deepseek-v4-flash'), 'deepseek-flash', '❌ 官方线路的前缀写法应识别')
   assert.equal(canonicalDeepSeekModel('ais/llm-gateway--kimi-k3'), undefined, '❌ 网关上的非 DeepSeek 模型不得计价')
   assert.equal(canonicalDeepSeekModel('vendor:deepseek-v4-pro'), 'deepseek-v4-pro', '❌ 冒号分隔应识别')
+}
+
+// ── 4c. 生效时段：peakPricing 关闭时全时段按非高峰（网关常见做法）──
+{
+  const tue = [2026, 11, 3] as const
+  assert.equal(bandFor(bj(...tue, 10), true), 'peak', '❌ 开启时应为高峰')
+  assert.equal(bandFor(bj(...tue, 10), false), 'offPeak', '❌ 关闭时高峰也应按非高峰计')
+  assert.equal(bandFor(bj(...tue, 20), false), 'offPeak')
+  assert.equal(bandFor(bj(2026, 11, 7, 10), false), 'offPeak')
 }
 
 // ── 5. 官方价目：峰值 = 空闲价的 2 倍（官方脚注），数值与官方页面一致 ──

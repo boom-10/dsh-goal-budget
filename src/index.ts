@@ -21,7 +21,7 @@ import {
   type GoalSpend, type Pricing, type TurnSpend,
 } from './accounting.ts'
 import { detectAccountCurrency, type CredentialsService } from './currency-detect.ts'
-import { bandAt, calendarCovers, canonicalDeepSeekModel, ratesFor, type Band, type CanonicalModel, type Currency, type ModelAliases } from './tariff.ts'
+import { bandFor, calendarCovers, canonicalDeepSeekModel, ratesFor, type Band, type CanonicalModel, type Currency, type ModelAliases } from './tariff.ts'
 import {
   describeBudget, formatDuration, formatTokens, formatUsd, isUnlimited,
   parseBudgetCommand, renderBudget, type Budget,
@@ -57,6 +57,13 @@ export const Config = z.object({
    * 插件已内置官方名、官方旧名，以及「去掉 `供应商/` 前缀」的匹配，多数网关无需配置。
    */
   modelAliases: z.dict(z.union([z.const('deepseek-flash'), z.const('deepseek-v4-pro')])).default({}),
+  /**
+   * 是否按 DeepSeek 官方的峰谷时段计价（北京时间周一至周五 9–12、14–18 为高峰，单价 2 倍）。
+   *
+   * 官方线路为 true。**网关线路通常为 false**：实测某网关 197 条 deepseek 记录全部落在高峰时段，
+   * 收费却与非高峰价逐条精确吻合（见 README「用网关账单校准」）。设错会让高峰时段高估一倍。
+   */
+  peakPricing: z.boolean().default(true),
   /** 超预算时的动作。`block` 会调 ctx.goals.block() 并自动 disarm。 */
   onExceed: z.union([z.const('block'), z.const('warn')]).default('block'),
   /** 达到该比例时注入一次提醒（0–1）。0 = 不提醒。 */
@@ -69,6 +76,7 @@ export interface GoalBudgetConfig {
   currency: 'auto' | Currency
   deepseekCredentialRef: string
   modelAliases: ModelAliases
+  peakPricing: boolean
   onExceed: 'block' | 'warn'
   warnAtRatio: number
 }
@@ -231,7 +239,7 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
    */
   // 单价与宿主 Config 同源 —— 客户端显示的数就是阻断判定用的数。
   let projection: ProjectionHandle | undefined
-  void Promise.resolve(ctx.sessionProjections.register(createGoalBudgetProjection(() => currency, config.modelAliases))).then(
+  void Promise.resolve(ctx.sessionProjections.register(createGoalBudgetProjection({ currency: () => currency, aliases: config.modelAliases, peakPricing: config.peakPricing }))).then(
     (handle) => {
       projection = handle
     },
@@ -414,7 +422,7 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
       const model = canonicalDeepSeekModel(route?.model, config.modelAliases)
       const pricing = model === undefined || currency === undefined || at === undefined
         ? undefined
-        : pricingOf(model, currency, bandAt(at))
+        : pricingOf(model, currency, bandFor(at, config.peakPricing))
       if (pricing === undefined) spend.unpricedTurns = (spend.unpricedTurns ?? 0) + 1
       const next = addUsage(opened, data?.usage, pricing ?? UNPRICED, at)
       spend.rounds.set(own.round, next)

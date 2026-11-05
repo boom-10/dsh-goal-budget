@@ -142,6 +142,18 @@ export function bandAt(at: number): Band {
   return inPeak ? 'peak' : 'offPeak'
 }
 
+/**
+ * 生效时段。
+ *
+ * `peakPricing` 为 false 时全时段按非高峰价计 —— 这是网关的常见做法。
+ * **实测依据**（见 README 的「用网关账单校准」一节）：网关上 197 条 deepseek 记录
+ * 全部落在高峰时段，而其收费与非高峰价**逐条精确吻合**（总绝对误差 0），
+ * 按 2 倍算则整体翻倍。所以网关线路必须关掉峰谷，否则高峰时段高估一倍。
+ */
+export function bandFor(at: number, peakPricing: boolean): Band {
+  return peakPricing ? bandAt(at) : 'offPeak'
+}
+
 /** 节假日日历是否覆盖这一时刻所在的年份。不覆盖时假期判断退回星期规则，结果不保证准确。 */
 export function calendarCovers(at: number): boolean {
   return COVERED_YEARS.includes(beijingClock(at).year)

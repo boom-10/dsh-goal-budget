@@ -25,6 +25,7 @@ const config = {
   currency: 'USD' as const,
   deepseekCredentialRef: 'DEEPSEEK_API_KEY',
   modelAliases: {},
+  peakPricing: true,
   onExceed: 'block' as const,
   warnAtRatio: 0.8,
 }

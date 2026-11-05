@@ -19,7 +19,7 @@ function fold(def: ReturnType<typeof createGoalBudgetProjection>, events: Array<
 
 // ── 1. 空状态：视图形状正确，且通过 viewSchema ──
 {
-  const def = createGoalBudgetProjection(() => 'USD')
+  const def = createGoalBudgetProjection({ currency: () => 'USD' })
   const view = def.wire.view(def.init())
   assert.equal(view.budget, null, '❌ 没设预算时 budget 应为 null')
   assert.equal(view.spent.currency, 'USD')
@@ -29,7 +29,7 @@ function fold(def: ReturnType<typeof createGoalBudgetProjection>, events: Array<
 
 // ── 2. 同一份用量，币种决定金额；非高峰与高峰相差 2 倍 ──
 {
-  const usd = createGoalBudgetProjection(() => 'USD')
+  const usd = createGoalBudgetProjection({ currency: () => 'USD' })
   const off = usd.wire.view(fold(usd, deepseek(bjTime(12))))
   assert.ok(Math.abs(off.spent.costUsd - 4.353723) < 1e-5, `❌ 美元非高峰应为 $4.3537，得到 ${off.spent.costUsd}`)
   assert.equal(off.spent.currency, 'USD')
@@ -37,7 +37,7 @@ function fold(def: ReturnType<typeof createGoalBudgetProjection>, events: Array<
   const peak = usd.wire.view(fold(usd, deepseek(bjTime(10))))
   assert.ok(Math.abs(peak.spent.costUsd - 2 * 4.353723) < 1e-4, '❌ 北京时间 10:00（高峰）应为非高峰的 2 倍')
 
-  const cny = createGoalBudgetProjection(() => 'CNY')
+  const cny = createGoalBudgetProjection({ currency: () => 'CNY' })
   const cnyView = cny.wire.view(fold(cny, deepseek(bjTime(12))))
   assert.ok(Math.abs(cnyView.spent.costUsd - 29.02482) < 1e-4, `❌ 人民币非高峰应为 ¥29.0248，得到 ${cnyView.spent.costUsd}`)
   assert.equal(cnyView.spent.currency, 'CNY')
@@ -47,7 +47,7 @@ function fold(def: ReturnType<typeof createGoalBudgetProjection>, events: Array<
 
 // ── 3. 币种未知：费用为 0、币种为 null，但 token 照常计入（不伪造金额）──
 {
-  const def = createGoalBudgetProjection(() => undefined)
+  const def = createGoalBudgetProjection({ currency: () => undefined })
   const view = def.wire.view(fold(def, deepseek(bjTime(12))))
   assert.equal(view.spent.costUsd, 0, '❌ 币种未知时不得伪造费用')
   assert.equal(view.spent.currency, null)
@@ -56,7 +56,7 @@ function fold(def: ReturnType<typeof createGoalBudgetProjection>, events: Array<
 
 // ── 4. 不能计价的模型：列出名字，费用不计，token 计入 ──
 {
-  const def = createGoalBudgetProjection(() => 'USD')
+  const def = createGoalBudgetProjection({ currency: () => 'USD' })
   const s = fold(def, [
     { type: 'request/header', data: { header: { config: { provider: 'gateway', model: 'claude-sonnet' } } } },
     { type: 'assistant/message', time: bjTime(12), data: { turn: 1, usage } },
@@ -69,14 +69,14 @@ function fold(def: ReturnType<typeof createGoalBudgetProjection>, events: Array<
 
 // ── 5. 没有用量的轮次：记为不可归因，不猜 ──
 {
-  const def = createGoalBudgetProjection(() => 'USD')
+  const def = createGoalBudgetProjection({ currency: () => 'USD' })
   const view = def.wire.view(fold(def, [{ type: 'assistant/message', time: bjTime(12), data: { turn: 1 } }]))
   assert.equal(view.spent.unbilledTurns, 1, '❌ 缺 usage 的轮次应计入 unbilledTurns')
 }
 
 // ── 6. /budget：金额带币种；off 清除 ──
 {
-  const def = createGoalBudgetProjection(() => 'CNY')
+  const def = createGoalBudgetProjection({ currency: () => 'CNY' })
   const set = fold(def, [{ type: 'command/run', data: { name: 'budget', args: '¥30' } }])
   assert.deepEqual(def.wire.view(set).budget, { tokens: 0, costUsd: 30, costCurrency: 'CNY' }, '❌ ¥30 应记为人民币上限')
   const cleared = def.apply(set, { type: 'command/run', data: { name: 'budget', args: 'off' } })
@@ -85,7 +85,7 @@ function fold(def: ReturnType<typeof createGoalBudgetProjection>, events: Array<
 
 // ── 6b. 网关线路：模型名带 `供应商/` 前缀，去掉前缀后按 Flash 计价 ──
 {
-  const def = createGoalBudgetProjection(() => 'USD')
+  const def = createGoalBudgetProjection({ currency: () => 'USD' })
   const s = fold(def, [
     { type: 'request/header', data: { header: { config: { provider: 'magpie-responses', model: 'cm-ais/deepseek-v4.1-flash' } } } },
     { type: 'assistant/message', time: bjTime(12), data: { turn: 1, usage } },
@@ -97,12 +97,24 @@ function fold(def: ReturnType<typeof createGoalBudgetProjection>, events: Array<
 
 // ── 6c. 别名表能覆盖网关的自定义名字 ──
 {
-  const def = createGoalBudgetProjection(() => 'USD', { 'vendor/my-flash': 'deepseek-flash' })
+  const def = createGoalBudgetProjection({ currency: () => 'USD', aliases: { 'vendor/my-flash': 'deepseek-flash' } })
   const s = fold(def, [
     { type: 'request/header', data: { header: { config: { provider: 'gateway', model: 'vendor/my-flash' } } } },
     { type: 'assistant/message', time: bjTime(12), data: { turn: 1, usage } },
   ])
   assert.ok(def.wire.view(s).spent.costUsd > 0, '❌ 别名应让自定义模型名可计价')
+}
+
+// ── 6d. ★ 关闭峰谷（网关口径）：同一份高峰日志金额减半 ──
+//     实测依据：网关上 197 条 deepseek 记录全部落在高峰时段，收费却与非高峰价逐条精确吻合。
+{
+  const official = createGoalBudgetProjection({ currency: () => 'USD' })
+  const gateway = createGoalBudgetProjection({ currency: () => 'USD', peakPricing: false })
+  const at = bjTime(10) // 北京时间 10:00，高峰
+  const a = official.wire.view(fold(official, deepseek(at))).spent.costUsd
+  const b = gateway.wire.view(fold(gateway, deepseek(at))).spent.costUsd
+  assert.ok(Math.abs(a - 2 * b) < 1e-9, `❌ 关闭峰谷后应恰好减半：官方口径 ${a}，网关口径 ${b}`)
+  assert.ok(Math.abs(b - 4.353723) < 1e-5, `❌ 网关口径应按非高峰价：${b}`)
 }
 
 // ── 7. 框架契约：不关心的事件必须返回同一个引用 ──

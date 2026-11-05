@@ -9,7 +9,7 @@ import { z } from 'zod'
 import { billedTokensOf, type TokenUsage } from './accounting.ts'
 import { parseBudgetCommand } from './budget-command.ts'
 import { OFF_DAYS } from './holiday-calendar.ts'
-import { bandAt, canonicalDeepSeekModel, costOfTariff, digestOf, ratesFor, type Band, type CanonicalModel, type Currency, type ModelAliases } from './tariff.ts'
+import { bandFor, canonicalDeepSeekModel, costOfTariff, digestOf, ratesFor, type Band, type CanonicalModel, type Currency, type ModelAliases } from './tariff.ts'
 
 /** 客户端读到的形状。 */
 export interface GoalBudgetView {
@@ -134,13 +134,19 @@ function viewOf(state: GoalBudgetState, currency: Currency | undefined): GoalBud
 /**
  * 构造投影定义。
  *
- * @param getCurrency - 当前账户币种；尚未识别时返回 undefined。读取视图时调用。
- * @param aliases - 模型别名表；必须与宿主用同一份，否则两边的计价会分歧。
+ * @param options - 计价口径；必须与宿主同源，否则两边会分歧。
  */
-export function createGoalBudgetProjection(
-  getCurrency: () => Currency | undefined = () => undefined,
-  aliases: ModelAliases = {},
-) {
+export function createGoalBudgetProjection(options: {
+  /** 当前账户币种；尚未识别时返回 undefined。读取视图时调用。 */
+  readonly currency?: () => Currency | undefined
+  /** 模型别名表。 */
+  readonly aliases?: ModelAliases
+  /** 是否按官方峰谷时段计价；网关线路为 false（见 bandFor 的实测依据）。 */
+  readonly peakPricing?: boolean
+} = {}) {
+  const getCurrency = options.currency ?? (() => undefined)
+  const aliases = options.aliases ?? {}
+  const peakPricing = options.peakPricing ?? true
   return {
     key: 'goalBudget',
     stateSchema,
@@ -199,7 +205,7 @@ export function createGoalBudgetProjection(
           tokens,
           buckets: addToBucket(state.buckets, {
             model,
-            band: bandAt(event.time ?? 0),
+            band: bandFor(event.time ?? 0, peakPricing),
             uncached: usage.inputTokens,
             cacheRead: usage.cacheReadTokens ?? 0,
             cacheWrite: usage.cacheWriteTokens ?? 0,

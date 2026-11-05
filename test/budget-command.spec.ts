@@ -54,6 +54,7 @@ mod.apply(ctx as never, {
   currency: 'USD',
   deepseekCredentialRef: 'DEEPSEEK_API_KEY',
   modelAliases: {},
+  peakPricing: true,
   onExceed: 'block',
   warnAtRatio: 0.8,
 })

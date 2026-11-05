@@ -158,6 +158,7 @@ Click it for the breakdown (built from the host's own primitives, so its look, k
     currency: auto                       # auto: detect via the DeepSeek balance endpoint (official route); write USD or CNY for a gateway
     deepseekCredentialRef: DEEPSEEK_API_KEY   # reference name of the key in the credentials service
     modelAliases: {}                     # map a renamed gateway model, e.g. cm-ais/deepseek-v5-flash: deepseek-flash
+    peakPricing: false                   # true for the official route; false for a flat-rate gateway (otherwise peak hours are 2x too high)
 ```
 
 Why both layers: a budget is a **runtime decision** — it changes per session — while plugin config is a **deployment decision** read at boot. Putting the budget only in config forces a restart to change something you decide in the moment.
@@ -268,6 +269,7 @@ Known, with current mitigation and what is still unsolved.
 | 15 | The account currency cannot be detected | the balance endpoint fails, or the account holds two currencies | cost is withheld with a note rather than guessed; set currency in the config | a gateway route does not use the DeepSeek balance endpoint, so its currency must be set |
 | 16 | Listeners were skipped when the profile set no default budget | a session that set its budget only with /budget reported success and showed numbers in the pill, yet nothing was ever accounted, so warn and block never fired - it looked healthy | - | fixed in 0.9.2: listeners register unconditionally, since a budget can be added at any time |
 | 17 | Attribution matched turn numbers across sessions | with two sessions running, turn numbers repeat, so session B's usage was charged to session A's goal; A could block early and B never saw its own usage | - | fixed in 0.9.2: ownership is keyed by (session, turn); without a session the usage is not attributed |
+| 18 | A gateway priced as if it followed the official peak schedule | with a flat-rate gateway, peak-hour cost is overstated 2x | - | fixed in 0.9.3: the `peakPricing` setting; measured `false` for this gateway |
 
 Number 7 is the one to watch: it fails *silently*. So does number 8. Both were found by testing behaviour rather than checking for absence of errors — the same shape as the harness's own post-mortem 0001, where 178 green tests and 100% line coverage coexisted with a completely non-functional feature.
 
@@ -305,6 +307,36 @@ One real session (42,074 events, 1,715 usage records, 3 routes) replays to:
 | Unpriced model | `ais/llm-gateway--kimi-k3` (not DeepSeek; 11,044,122 tokens left unpriced) |
 
 This replay caught a bug the synthetic tests missed: the gateway separates with `--` (`ais/llm-gateway--deepseek-v4-flash`), while the plugin only stripped a `vendor/` prefix, so **the whole session priced at $0**. After the fix it is $6.6252; the gap from the flat off-peak estimate of $4.35 in 0.8.1 is exactly the peak-hours share billed at 2x.
+
+### Calibrating against the gateway's own bill
+
+The gateway exposes usage and cost, so the plugin's unit prices can be checked against a real bill:
+
+```sh
+curl -s "http://127.0.0.1:3425/v1/magpie/usage/requests?model=deepseek-flash&limit=200" \
+  -H "Authorization: Bearer $MAGPIE_GATEWAY_KEY"
+```
+
+Checking **197 real records**:
+
+| Hypothesis | Total absolute error over 197 records |
+| --- | --- |
+| Off-peak rate at all times | **0.0000000000** (exact, record by record) |
+| Peak hours at 2x | 0.2373034560 (exactly the batch's total cost) |
+
+Two conclusions, both of which changed the implementation:
+
+1. **The unit prices 0.15 / 0.003 / 0.6 USD per million are correct** - they match DeepSeek's official off-peak rates to 1e-10 on every record.
+2. **This gateway bills a flat rate and does not price by time of day.** All 197 records fall inside Beijing peak hours, yet every one is charged the off-peak rate. Hence the `peakPricing` setting: keep `true` for the official route, set `false` for a gateway. **Getting it wrong overstates peak hours by 2x.**
+
+The same session (9,958 events) under both settings:
+
+| Mode | DeepSeek share |
+| --- | --- |
+| `official` (peak/off-peak) | $5.2357 |
+| `flat` (gateway) | **$3.1806** |
+
+One more finding: the gateway reports `cm-ais/deepseek-v4.1-flash` - the id DSH actually uses - as **unpriced** (6,643 calls, cost recorded as 0), because its price table has no entry for that id. That spending is therefore invisible in the gateway's own bill, which is exactly the gap this plugin fills.
 
 ---
 

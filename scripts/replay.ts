@@ -6,7 +6,7 @@
  * 用来验证插件在真实数据上的行为。
  *
  * 用法：
- *   node --experimental-strip-types scripts/replay.ts <会话.jsonl> [USD|CNY]
+ *   node --experimental-strip-types scripts/replay.ts <会话.jsonl> [USD|CNY] [official|flat]
  *
  * 日志是 zstd 压缩的（session.jsonl.zstd）。解压方式（系统 Python 3.14+）：
  *   python3 -c "from compression import zstd,pathlib; \
@@ -17,14 +17,16 @@ import { createInterface } from 'node:readline'
 import { createGoalBudgetProjection } from '../src/budget-projection.ts'
 import type { Currency } from '../src/tariff.ts'
 
-const [file, currencyArg] = process.argv.slice(2)
+const [file, currencyArg, modeArg] = process.argv.slice(2)
 if (file === undefined) {
   console.error('用法: node --experimental-strip-types scripts/replay.ts <会话.jsonl> [USD|CNY]')
   process.exit(1)
 }
 const currency = (currencyArg ?? 'USD') as Currency
 
-const def = createGoalBudgetProjection(() => currency)
+// mode: 缺省 official（官方峰谷）；`flat` = 网关口径（固定单价，不区分峰谷）。
+const peakPricing = modeArg !== 'flat'
+const def = createGoalBudgetProjection({ currency: () => currency, peakPricing })
 let state = def.init()
 let events = 0
 const routes = new Set<string>()
@@ -43,7 +45,7 @@ for await (const line of lines) {
 
 const view = def.wire.view(state)
 const money = (n: number) => `${currency === 'CNY' ? '¥' : '$'}${n.toFixed(4)}`
-console.log(`事件 ${events.toLocaleString('en-US')} 条 · 路线 ${routes.size} 条`)
+console.log(`事件 ${events.toLocaleString('en-US')} 条 · 路线 ${routes.size} 条 · 口径 ${peakPricing ? 'official（峰谷）' : 'flat（网关固定价）'}`)
 for (const r of routes) console.log(`  路线: ${r}`)
 console.log(`token 合计: ${view.spent.tokens.toLocaleString('en-US')}`)
 console.log(`费用（${currency}）: ${money(view.spent.costUsd)}`)
