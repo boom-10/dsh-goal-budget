@@ -307,7 +307,11 @@ One real session (42,074 events, 1,715 usage records, 3 routes) replays to:
 | Peak-hour usage | 418,573,609 tokens (about 64%, billed at 2x) |
 | Unpriced model | `ais/llm-gateway--kimi-k3` (not DeepSeek; 11,044,122 tokens left unpriced) |
 
-This replay caught a bug the synthetic tests missed: the gateway separates with `--` (`ais/llm-gateway--deepseek-v4-flash`), while the plugin only stripped a `vendor/` prefix, so **the whole session priced at $0**. After the fix it is $6.6252; the gap from the flat off-peak estimate of $4.35 in 0.8.1 is exactly the peak-hours share billed at 2x.
+This replay caught a bug the synthetic tests missed: the gateway separates with `--` (`ais/llm-gateway--deepseek-v4-flash`), while the plugin only stripped a `vendor/` prefix, so **the whole session priced at $0**.
+
+The same DeepSeek usage (654,046,007 tokens) under both settings: **$4.1893 flat, $6.6252 with the official peak schedule** - the 58% difference is exactly the peak-hours share billed at 2x.
+
+⚠️ Do not compare the $4.3537 that "all tokens x Flash rate" produces against the $6.6252: **the denominators differ.** That figure also prices the 11,044,122 tokens from the non-DeepSeek route at the Flash rate (about $0.1644 too much), and the plugin deliberately leaves that route **unpriced**, naming it instead.
 
 ### Calibrating against the gateway's own bill
 
