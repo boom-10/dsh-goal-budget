@@ -50,7 +50,7 @@ const ctx = {
 // mock ctx 形状故意宽松 —— 这里只关心插件行为，不关心宿主类型。
 mod.apply(ctx as never, {
   // profile 默认：1 美元
-  budget: { tokens: 0, costUsd: 1 },
+  budget: { tokens: 0, costUsd: 1, wallClockMs: 0 },
   pricing: { inputPerMillion: 0.15, outputPerMillion: 0.6, cacheReadPerMillion: 0.003 },
   onExceed: 'block',
   warnAtRatio: 0.8,

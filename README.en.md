@@ -49,11 +49,41 @@ That sentence names three missing pieces. This plugin fills two of them:
 | --- | --- |
 | session events **not attributed to the goal message** | ✅ done here, keyed by `goalId` + `round` |
 | not **mapped into goal blocker codes** | ✅ done here, `code: 'budget-exceeded'` |
-| wall-clock budget | ⬜ not implemented yet |
+| wall-clock budget | ✅ done (0.8.0), computed as the sum of turn spans - see "Time budget" below |
 
 `GoalBlockReason.code` is an open `string` documented as *"chosen by the blocking policy"* — it exists so a policy plugin can name its own condition. Only two codes ship in-tree today (`model-reported`, `round-limit`). This adds `budget-exceeded`.
 
 ---
+
+## Time budget
+
+Besides tokens and cost, a goal can carry a **compute-time** cap:
+
+```
+/budget 30min          cap this session's compute time at 30 minutes
+/budget $5 30min       cap both cost and time; whichever is reached first wins
+```
+
+Units: `s` (seconds) · `min` (minutes) · `h` (hours).
+
+> **Why `min` and not `m`?** `m` already means "million tokens" (`1.5m` = 1.5 million). Giving one letter two meanings guarantees a typo, and the typo fails silently by setting an absurd cap.
+
+### What it measures
+
+**Compute time = the sum of turn spans.** Each turn runs from its `turn/start` to its last `turn/end`, and the whole interval counts.
+
+This is **not** `now - goal creation`. The difference matters: a goal paused overnight would blow a 30-minute budget the next morning if you measured from creation, even though it only ran for a few minutes. Summing turn spans counts only the time the work was actually running.
+
+The cost is that **idle time between turns is not counted.** A goal can run for three days and show 20 minutes of compute time. That is the right behaviour for a plugin that constrains compute, but read the figure with that meaning.
+
+### Where the time comes from
+
+Durations use only the timestamp each session event already carries (`SessionEvent.time`), never `Date.now()`. Replaying the same log yields the same number, so the gate and the projection measure the same thing.
+
+### Current limits
+
+- **Enforcement runs on the host.** Exceeding the cap blocks the goal and names the dimension that tripped.
+- **The pill does not show time yet.** The projection carries tokens and cost; showing time in the pill needs a host-side extension point that does not exist yet. The `/budget` text output does show the elapsed time.
 
 ## Install
 

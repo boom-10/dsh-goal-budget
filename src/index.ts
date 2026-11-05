@@ -16,10 +16,13 @@
 
 import z from '@deepseek-ai/schemastery'
 import type { Infer } from '@deepseek-ai/schemastery'
-import { addUsage, checkBudget, type GoalSpend, type Pricing, type TurnSpend } from './accounting.ts'
 import {
-  describeBudget, formatTokens, formatUsd, isUnlimited, parseBudgetCommand,
-  renderBudget, type Budget,
+  addUsage, checkBudget, openRound, totalsOf,
+  type GoalSpend, type Pricing, type TurnSpend,
+} from './accounting.ts'
+import {
+  describeBudget, formatDuration, formatTokens, formatUsd, isUnlimited,
+  parseBudgetCommand, renderBudget, type Budget,
 } from './budget-command.ts'
 import { createGoalBudgetProjection } from './budget-projection.ts'
 
@@ -35,8 +38,10 @@ export const Config = z.object({
       tokens: z.number().default(0),
       /** 累计费用上限（美元，按下面的单价估算）。0 = 不限制。 */
       costUsd: z.number().default(0),
+      /** 累计计算时间上限（毫秒）：各轮跨度之和，不含轮与轮之间的空闲。0 = 不限制。 */
+      wallClockMs: z.number().default(0),
     })
-    .default({ tokens: 0, costUsd: 0 }),
+    .default({ tokens: 0, costUsd: 0, wallClockMs: 0 }),
   pricing: z
     .object({
       inputPerMillion: z.number().default(0.15),
@@ -53,7 +58,7 @@ export const Config = z.object({
 
 /** 与上面的 Config schema 一一对应。schema 改了这个也要改 —— tsc 会检查赋值处。 */
 export interface GoalBudgetConfig {
-  budget: { tokens: number; costUsd: number }
+  budget: { tokens: number; costUsd: number; wallClockMs: number }
   pricing: { inputPerMillion: number; outputPerMillion: number; cacheReadPerMillion: number }
   onExceed: 'block' | 'warn'
   warnAtRatio: number
@@ -151,6 +156,7 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
   const profileBudget: Budget = {
     tokens: config.budget?.tokens ?? 0,
     costUsd: config.budget?.costUsd ?? 0,
+    wallClockMs: config.budget?.wallClockMs ?? 0,
   }
 
   /**
@@ -278,9 +284,23 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
     liveLedgers.clear()
   }) as never)
 
-  /** ② 累加：usage 挂在 assistant/message 上，且带 turn/step。 */
-  ctx.on('session/event', ((session: object, event: { type?: string; data?: unknown }) => {
-    if (event?.type !== 'assistant/message') return
+  /**
+   * ② 累加：花费挂在 `assistant/message`，时长靠 `turn/start` / `turn/end`。
+   *
+   * ★ 时间维度为什么用这两个事件而不是 `Date.now()`：
+   *
+   * `agent/inbox/claimed`（归因用）是 **agent 事件，不带 time**；而
+   * `turn/start` / `turn/end`（packages/core/session/src/types.ts:294/303）是
+   * **session 事件，自带 `SessionEvent.time`**。
+   *
+   * 只用事件时间的好处是**同一份事实可以投影**：`goalBudget` 投影 fold 同样的
+   * 事件得到同样的时长，客户端显示的数与宿主判定用的数不会分歧
+   * —— 这正是 0.5.0 修掉的那一类 bug。用 `Date.now()` 就做不到了。
+   */
+  ctx.on('session/event', ((session: object, event: { type?: string; time?: number; data?: unknown }) => {
+    const type = event?.type
+    if (type !== 'assistant/message' && type !== 'turn/start' && type !== 'turn/end') return
+    const at = typeof event.time === 'number' ? event.time : undefined
     const data = event.data as { turn?: number; usage?: never } | undefined
     const turn = data?.turn
     if (typeof turn !== 'number') return
@@ -290,7 +310,20 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
       if (!own) continue
       const spend = spendFor(l, own.goalId)
       const prev = spend.rounds.get(own.round) ?? emptyTurn(turn)
-      const next = addUsage(prev, data?.usage, pricing)
+
+      if (type === 'turn/start') {
+        spend.rounds.set(own.round, at === undefined ? prev : openRound(prev, at))
+        return
+      }
+      if (type === 'turn/end') {
+        spend.rounds.set(own.round, at === undefined ? prev : { ...prev, endedAt: Math.max(prev.endedAt ?? at, at) })
+        return
+      }
+
+      // assistant/message —— 保险：若 turn/start 在归因建立之前就到了，
+      // 这里补开这一轮，否则 startedAt 会一直是 undefined，时长恒为 0。
+      const opened = at === undefined ? prev : openRound(prev, at)
+      const next = addUsage(opened, data?.usage, pricing, at)
       spend.rounds.set(own.round, next)
       if (!next.attributable) spend.unattributableTurns += 1
       void session
@@ -302,18 +335,19 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
 }
 
 /** 某会话所有 goal 的累计用量 —— 给 `/budget` 显示用。 */
-function usedFor(agent: object): { tokens: number; costUsd: number } | undefined {
+function usedFor(agent: object): { tokens: number; costUsd: number; wallClockMs: number } | undefined {
   const l = ledgers.get(agent)
   if (!l) return undefined
   let tokens = 0
   let costUsd = 0
+  let wallClockMs = 0
   for (const spend of l.byGoal.values()) {
-    for (const t of spend.rounds.values()) {
-      tokens += t.inputTokens + t.outputTokens + t.reasoningTokens
-      costUsd += t.costUsd
-    }
+    const t = totalsOf(spend)
+    tokens += t.tokens
+    costUsd += t.costUsd
+    wallClockMs += t.wallClockMs
   }
-  return { tokens, costUsd }
+  return { tokens, costUsd, wallClockMs }
 }
 
 /** 遍历用的活跃账本集合。 */
@@ -353,9 +387,12 @@ function evaluate(
   if (!verdict.exceeded) return
   if (l.blocked.has(goalId)) return
 
+  // 三个维度的量纲不同：时间要按人类可读格式渲染，否则会出现「1800000 / 3600000」。
+  const usedText = verdict.kind === 'wallClockMs' ? formatDuration(verdict.used) : String(verdict.used)
+  const limitText = verdict.kind === 'wallClockMs' ? formatDuration(verdict.limit) : String(verdict.limit)
   const message =
     `Goal exceeded its configured ${verdict.kind} budget: ` +
-    `${verdict.used.toFixed(verdict.kind === 'costUsd' ? 6 : 0)} / ${verdict.limit}` +
+    `${verdict.kind === 'costUsd' ? verdict.used.toFixed(6) : usedText} / ${limitText}` +
     (spend.unattributableTurns > 0
       ? ` (${spend.unattributableTurns} turn(s) reported no usage and are not counted)`
       : '')

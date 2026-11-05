@@ -5,10 +5,16 @@
  * 而且它和宿主无关。做成纯函数就能不启动宿主、不调模型地测。
  */
 
-/** 一个预算额度。两个字段都为 0 表示「无限制」。 */
+/**
+ * 一个预算额度。三个维度都为 0 表示「无限制」。
+ *
+ * 三个维度是**并列**的，谁先到算谁（见 `checkBudget`）。
+ */
 export interface Budget {
   readonly tokens: number
   readonly costUsd: number
+  /** 计算时间上限（毫秒）。0 = 不限制。 */
+  readonly wallClockMs: number
 }
 
 /** `/budget` 的解析结果。 */
@@ -19,22 +25,53 @@ export type BudgetCommand =
   | { readonly kind: 'invalid'; readonly reason: string }
 
 /** 无限制预算。 */
-export const UNLIMITED: Budget = { tokens: 0, costUsd: 0 }
+export const UNLIMITED: Budget = { tokens: 0, costUsd: 0, wallClockMs: 0 }
 
 /** 是否等于无限制。 */
 export function isUnlimited(b: Budget): boolean {
-  return b.tokens <= 0 && b.costUsd <= 0
+  return b.tokens <= 0 && b.costUsd <= 0 && b.wallClockMs <= 0
+}
+
+const MINUTE = 60_000
+const HOUR = 3_600_000
+
+/**
+ * 时长单位 → 毫秒。
+ *
+ * ★ 这里**刻意不收 `m`**：`m` 已经被 token 的「百万」占用
+ *   （`1.5m` = 150 万 token）。让同一个字母有两种含义，用户一定会写错，
+ *   而且错了不会报错 —— 只会安静地设成一个荒谬的上限。
+ *   所以分钟必须写 `min`。
+ */
+const DURATION_UNITS: Record<string, number> = {
+  s: 1_000, sec: 1_000, secs: 1_000, second: 1_000, seconds: 1_000,
+  min: MINUTE, mins: MINUTE, minute: MINUTE, minutes: MINUTE,
+  h: HOUR, hr: HOUR, hrs: HOUR, hour: HOUR, hours: HOUR,
+}
+
+/** 人类可读的时长：`1800000` → `30min`。 */
+export function formatDuration(ms: number): string {
+  if (ms <= 0) return '0'
+  if (ms % HOUR === 0) return `${ms / HOUR}h`
+  if (ms % MINUTE === 0) return `${ms / MINUTE}min`
+  if (ms % 1_000 === 0) return `${ms / 1_000}s`
+  return `${(ms / MINUTE).toFixed(1)}min`
 }
 
 /**
  * 解析一个数量词。
  *
- * 支持：`500000` · `500k` · `1.5m` · `$5` · `$0.50`
+ * 支持：
+ * - 金额：`$5` · `$0.50` · `5$`
+ * - token：`500000` · `500k` · `1.5m`
+ * - 时长：`30s` · `5min` · `2h`（**`m` 不表示分钟**，见 DURATION_UNITS 的说明）
  *
  * @param raw - 用户输入的单个词。
  * @returns 解析结果；无法解析时 `undefined`。
  */
-function parseAmount(raw: string): { kind: 'tokens' | 'costUsd'; value: number } | undefined {
+function parseAmount(
+  raw: string,
+): { kind: 'tokens' | 'costUsd' | 'wallClockMs'; value: number } | undefined {
   const text = raw.trim().toLowerCase()
   if (text.length === 0) return undefined
 
@@ -43,6 +80,17 @@ function parseAmount(raw: string): { kind: 'tokens' | 'costUsd'; value: number }
   if (usd) {
     const value = Number(usd[1] ?? usd[2])
     return Number.isFinite(value) && value > 0 ? { kind: 'costUsd', value } : undefined
+  }
+
+  // 时长：30s / 5min / 2h —— 先试，因为 's'/'h' 不会被 token 规则吃掉
+  const dur = /^(\d+(?:\.\d+)?)([a-z]+)$/.exec(text)
+  if (dur) {
+    const unit = DURATION_UNITS[dur[2]!]
+    if (unit !== undefined) {
+      const base = Number(dur[1])
+      if (!Number.isFinite(base) || base <= 0) return undefined
+      return { kind: 'wallClockMs', value: Math.round(base * unit) }
+    }
   }
 
   // token：500000 / 500k / 1.5m
@@ -80,6 +128,7 @@ export function parseBudgetCommand(rawInput: string): BudgetCommand {
   const words = input.split(/\s+/).filter(w => w.length > 0)
   let tokens = 0
   let costUsd = 0
+  let wallClockMs = 0
   const labels: string[] = []
 
   for (const word of words) {
@@ -87,24 +136,32 @@ export function parseBudgetCommand(rawInput: string): BudgetCommand {
     if (parsed === undefined) {
       return {
         kind: 'invalid',
-        reason: `无法理解的额度 "${word}"。用法：/budget $5 · /budget 500k · /budget $5 500k · /budget off`,
+        reason: `无法理解的额度 "${word}"。用法：/budget $5 · /budget 500k · /budget 30min · /budget off`,
       }
     }
-    if (parsed.kind === 'costUsd') {
-      if (costUsd > 0) return { kind: 'invalid', reason: '金额只能写一次。' }
-      costUsd = parsed.value
-      labels.push(`$${parsed.value}`)
-    } else {
-      if (tokens > 0) return { kind: 'invalid', reason: 'token 数只能写一次。' }
-      tokens = parsed.value
-      labels.push(`${formatTokens(parsed.value)} tokens`)
+    switch (parsed.kind) {
+      case 'costUsd':
+        if (costUsd > 0) return { kind: 'invalid', reason: '金额只能写一次。' }
+        costUsd = parsed.value
+        labels.push(`$${parsed.value}`)
+        break
+      case 'tokens':
+        if (tokens > 0) return { kind: 'invalid', reason: 'token 数只能写一次。' }
+        tokens = parsed.value
+        labels.push(`${formatTokens(parsed.value)} tokens`)
+        break
+      case 'wallClockMs':
+        if (wallClockMs > 0) return { kind: 'invalid', reason: '时长只能写一次。' }
+        wallClockMs = parsed.value
+        labels.push(formatDuration(parsed.value))
+        break
     }
   }
 
-  if (tokens === 0 && costUsd === 0) {
+  if (tokens === 0 && costUsd === 0 && wallClockMs === 0) {
     return { kind: 'invalid', reason: '至少要给一个上限。' }
   }
-  return { kind: 'set', budget: { tokens, costUsd }, label: labels.join(' + ') }
+  return { kind: 'set', budget: { tokens, costUsd, wallClockMs }, label: labels.join(' + ') }
 }
 
 /** 人类可读的 token 数：`523000` → `523k`。 */
@@ -126,6 +183,7 @@ export function describeBudget(b: Budget): string {
   const parts: string[] = []
   if (b.tokens > 0) parts.push(`${formatTokens(b.tokens)} tokens`)
   if (b.costUsd > 0) parts.push(formatUsd(b.costUsd))
+  if (b.wallClockMs > 0) parts.push(formatDuration(b.wallClockMs))
   return parts.join(' 或 ')
 }
 
@@ -139,7 +197,7 @@ export function describeBudget(b: Budget): string {
 export function renderBudget(
   effective: Budget,
   source: 'session' | 'profile',
-  used: { tokens: number; costUsd: number } | undefined,
+  used: { tokens: number; costUsd: number; wallClockMs: number } | undefined,
 ): string {
   const lines: string[] = []
   lines.push(`预算：${describeBudget(effective)}`)
@@ -155,11 +213,18 @@ export function renderBudget(
       const pct = ((used.costUsd / effective.costUsd) * 100).toFixed(0)
       ratios.push(`费用 ${formatUsd(used.costUsd)} / ${formatUsd(effective.costUsd)}（${pct}%）`)
     }
+    if (effective.wallClockMs > 0) {
+      const pct = ((used.wallClockMs / effective.wallClockMs) * 100).toFixed(0)
+      ratios.push(`时间 ${formatDuration(used.wallClockMs)} / ${formatDuration(effective.wallClockMs)}（${pct}%）`)
+    }
     if (ratios.length > 0) lines.push(`已用：${ratios.join(' · ')}`)
   } else if (used !== undefined) {
-    lines.push(`已用：${formatTokens(used.tokens)} tokens · ${formatUsd(used.costUsd)}`)
+    lines.push(
+      `已用：${formatTokens(used.tokens)} tokens · ${formatUsd(used.costUsd)}` +
+      ` · ${formatDuration(used.wallClockMs)}`,
+    )
   }
 
-  lines.push('用法：/budget $5 · /budget 500k · /budget $5 500k · /budget off')
+  lines.push('用法：/budget $5 · /budget 500k · /budget 30min · /budget off')
   return lines.join('\n')
 }
