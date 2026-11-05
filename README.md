@@ -146,10 +146,13 @@ dsh plugin --profile desktop add github:boom-10/dsh-goal-budget
       costUsd: 5.00
     onExceed: block        # 或 'warn'，只记日志不阻断
     warnAtRatio: 0.8
-    pricing:
-      inputPerMillion: 0.15
-      outputPerMillion: 0.60
-      cacheReadPerMillion: 0.003
+    prices:
+      - model: deepseek-flash      # 按模型 id 匹配，不区分网关
+        inputPerMillion: 0.15      # 非高峰价，每百万 token
+        outputPerMillion: 0.6
+        cacheReadPerMillion: 0.003
+        peakMultiplier: 2          # 高峰价是非高峰的倍数；网关不分时段就设 1
+        holidays: []               # YYYY-MM-DD，这些日期全天按非高峰计
 ```
 
 **为什么坚持做两层：** 预算是**运行时决策**（每个会话都可能不同），而插件配置是**部署决策**（启动时读取）。把预算只放在配置里，意味着为了改一个你当场决定的值要重启应用。
@@ -264,7 +267,7 @@ block(agent: Agent, ref: GoalRef, reason: GoalBlockReason): GoalView
 | # | 怎么坏 | 表现 | 缓解 | 仍未解决 |
 | --- | --- | --- | --- | --- |
 | 1 | 一轮里混有人类消息和目标消息 | 人类的消费被记到目标上；过早阻断 | 严格过滤 `source.kind === 'goal'` | 混合轮的花费无法干净拆分；发生时记一条警告 |
-| 2 | 单价与默认值不同 | 成本估算偏移；阻断点错误 | 所有单价都可配；文档说明这是估算 | 供应商调价、峰谷价、网关加价都不跟踪 |
+| 2 | 单价与实际计费不同 | 成本估算偏移；阻断点错误 | 单价按模型配置；查不到单价的模型不计费并列出；高峰按 UTC 时段计价 | 供应商调价不自动跟随；节假日需手动维护；网关加价需手动填写 |
 | 3 | 重启后重建状态 | 预算重置或翻倍 | 花费只从会话日志重算，不另存 | 会话格式迁移可能改变字段可用性 |
 | 4 | 适配器不上报 `usage` | 花费**静默**未计入 | 标记为**不可归因**并计数，**从不猜**；阻断信息里报告条数 | **完全不上报 usage 的供应商根本无法约束** |
 | 5 | 一个会话里有多个目标 | 花费记到错的目标上 | 按 `goalId` 过滤 | 切换目标时的边界轮次 |
@@ -275,6 +278,7 @@ block(agent: Agent, ref: GoalRef, reason: GoalBlockReason): GoalView
 | 10 | 目标已被阻断，然后调高预算 | 花费仍超旧限额，但没人重新检查 | 设置或清除预算时会清掉阻断标记，下一步重新判定 | 已经 `blocked` 的目标需要操作者手动恢复 |
 | 11 | 客户端与宿主各算一套成本 | 看到的数和阻断的数不一致 | 花费由宿主算好放进投影，**客户端只显示** | 客户端读不到 profile 默认值，所以只有设了会话上限才显示分母 |
 | 12 | 把缓存命中从输入里扣掉 | 未命中输入被低估，缓存率高的会话偏差最大 | 已修（0.8.1）：三个输入桶并列计价，不再扣减；用真实会话合计做回归测试 | — |
+| 13 | 宿主门禁只看插件加载后的请求头 | 重启后若会话的模型没有变化，门禁会把用量当成未定价，费用不计 | 面板的花费由日志重建，不受影响 | 待修：门禁应从投影读取当前路由 |
 
 **第 7 条是要盯着的那条：它失败时*没有声音*。第 8 条也是。**
 
@@ -286,9 +290,13 @@ block(agent: Agent, ref: GoalRef, reason: GoalBlockReason): GoalView
 
 ### 单价与高峰时段
 
-默认单价取自 [DeepSeek 官方价格页](https://api-docs.deepseek.com/quick_start/pricing/) 的 `deepseek-flash`（DeepSeek-V4.1-Flash-1017）**非高峰价**：输入未命中 $0.15、缓存命中 $0.003、输出 $0.6（每百万 token）。高峰时段（UTC 01–04 与 06–10 点，周一至周五，中国法定节假日除外）价格翻倍。
+价格表是插件配置里的一个列表，**按会话当前使用的模型**查单价（路由来自 `request/header`）：
 
-当前插件**按固定的非高峰价计价**，所以高峰时段的花费会低估约一半。这是未解决的问题（见失败模式第 2 条）。如果你的线路经由网关（例如 AIS / Compass），网关的实际计费可能不同，请用 `pricing` 配置覆盖为网关的价格。
+- 查不到单价的模型**不猜**：token 照常计入，费用不计，并在面板里列出它的名字（如 `a/claude-sonnet`），让你补价格。
+- 内置默认值只有官方 DeepSeek 的两个模型（`deepseek-flash`、`deepseek-v4-pro`），来源 [DeepSeek 官方价格页](https://api-docs.deepseek.com/quick_start/pricing/)，都是**非高峰价**。
+- 高峰时段（UTC 01–04 与 06–10 点，周一至周五）按 `peakMultiplier`（官方为 2）计价，按每条用量的事件时间判断。
+- 节假日要填进 `holidays`。官方规则排除中国法定节假日，插件不会自动更新这个列表。
+- 价格按**模型 id** 匹配，不区分网关。如果你的网关对同一个模型收费不同，把它的单价写进 `prices`，并把 `peakMultiplier` 设为 1（网关不分时段）。
 
 ---
 

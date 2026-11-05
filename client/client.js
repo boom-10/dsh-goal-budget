@@ -58,6 +58,7 @@ window.__ModuleLoader__.load({
         noCapHint: '用 /budget $5 或 /budget 500k 设置',
         unbilled: '{count} 轮未上报 token 用量，未计入',
         provenance: '由宿主计价，与预算判定同一套算法',
+        unpriced: '未计价：{models}（费用未计入，请在价格表里配置）',
         summaryNone: '本会话已花费 {cost}，未设上限',
         summaryCapped: '本会话已花费 {cost}，上限 {limit}，已用 {percent}%',
       },
@@ -73,6 +74,7 @@ window.__ModuleLoader__.load({
         noCapHint: 'Set one with /budget $5 or /budget 500k',
         unbilled: '{count} turn(s) reported no token usage and are not counted',
         provenance: 'Priced by the host with the same math the budget gate uses',
+        unpriced: 'No price for {models}; its cost is not counted (add it to the price table)',
         summaryNone: 'Session spend {cost}, no cap set',
         summaryCapped: 'Session spend {cost} of {limit} budget, {percent}% used',
       },
@@ -146,6 +148,13 @@ window.__ModuleLoader__.load({
           width: pct + '%', background: color, borderRadius: '2px',
         },
       }))
+    }
+
+    /** 用过但没有单价的模型：列出它们，并说明费用没有计入。 */
+    function unpricedLine(spent, t) {
+      const models = spent.unpricedModels
+      if (!models || models.length === 0) return null
+      return h('div', { style: NOTE }, t('unpriced', { models: models.join(', ') }))
     }
 
     function GoalBudgetPill(props) {
@@ -229,6 +238,7 @@ window.__ModuleLoader__.load({
                 ? h('div', { style: NOTE }, t('unbilled', { count: spent.unbilledTurns }))
                 : null,
               h('div', { style: NOTE }, t('provenance')),
+              unpricedLine(spent, t),
             ),
             document.body,
           )

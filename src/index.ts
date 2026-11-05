@@ -17,8 +17,8 @@
 import z from '@deepseek-ai/schemastery'
 import type { Infer } from '@deepseek-ai/schemastery'
 import {
-  addUsage, checkBudget, openRound, totalsOf,
-  type GoalSpend, type Pricing, type TurnSpend,
+  addUsage, checkBudget, DEFAULT_PRICES, findPriceByModel, openRound, pricingAt, totalsOf, UNPRICED,
+  type GoalSpend, type PriceEntry, type TurnSpend,
 } from './accounting.ts'
 import {
   describeBudget, formatDuration, formatTokens, formatUsd, isUnlimited,
@@ -42,14 +42,24 @@ export const Config = z.object({
       wallClockMs: z.number().default(0),
     })
     .default({ tokens: 0, costUsd: 0, wallClockMs: 0 }),
-  pricing: z
-    .object({
-      inputPerMillion: z.number().default(0.15),
-      outputPerMillion: z.number().default(0.6),
-      /** ★ 缓存命中单价，比未命中低约 50 倍（第 0004 节实测）。 */
-      cacheReadPerMillion: z.number().default(0.003),
-    })
-    .default({ inputPerMillion: 0.15, outputPerMillion: 0.6, cacheReadPerMillion: 0.003 }),
+  /**
+   * 价格表，按模型 id 匹配（不区分网关）。留空则使用内置的 DeepSeek 官方价格。
+   * 查不到单价的模型：token 照常计入，费用不计，并在面板里列出它的名字。
+   */
+  prices: z
+    .array(
+      z.object({
+        model: z.string(),
+        inputPerMillion: z.number(),
+        outputPerMillion: z.number(),
+        cacheReadPerMillion: z.number(),
+        /** 高峰价相对非高峰价的倍数。官方 DeepSeek 为 2；网关不分时段就设 1。 */
+        peakMultiplier: z.number().default(2),
+        /** `YYYY-MM-DD`：这些日期全天按非高峰计（官方排除中国法定节假日，需要你维护）。 */
+        holidays: z.array(z.string()).default([]),
+      }),
+    )
+    .default([]),
   /** 超预算时的动作。`block` 会调 ctx.goals.block() 并自动 disarm。 */
   onExceed: z.union([z.const('block'), z.const('warn')]).default('block'),
   /** 达到该比例时注入一次提醒（0–1）。0 = 不提醒。 */
@@ -59,7 +69,7 @@ export const Config = z.object({
 /** 与上面的 Config schema 一一对应。schema 改了这个也要改 —— tsc 会检查赋值处。 */
 export interface GoalBudgetConfig {
   budget: { tokens: number; costUsd: number; wallClockMs: number }
-  pricing: { inputPerMillion: number; outputPerMillion: number; cacheReadPerMillion: number }
+  prices: readonly PriceEntry[]
   onExceed: 'block' | 'warn'
   warnAtRatio: number
 }
@@ -105,6 +115,8 @@ type Ctx = {
  */
 const ledgers = new WeakMap<object, Ledger>()
 const liveLedgers = new Set<Ledger>()
+/** 每个会话当前请求头的路由（provider、model）：计价按它查模型的单价。 */
+const routeBySession = new WeakMap<object, { provider?: string; model?: string }>()
 
 type Ledger = {
   /** turn → 这个 turn 属于哪个 goal 的哪一轮（来自 agent/inbox/claimed） */
@@ -178,10 +190,19 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
       : { budget: override, source: 'session' }
   }
 
-  const pricing: Pricing = config.pricing ?? {
-    inputPerMillion: 0.15,
-    outputPerMillion: 0.6,
-    cacheReadPerMillion: 0.003,
+  const prices: readonly PriceEntry[] = config.prices.length > 0 ? config.prices : DEFAULT_PRICES
+  for (const e of prices) {
+    if (e.inputPerMillion < 0 || e.outputPerMillion < 0 || e.cacheReadPerMillion < 0) {
+      throw new Error(`[goal-budget] 模型 ${e.model} 的单价不能为负`)
+    }
+    if (!(e.peakMultiplier >= 1)) {
+      throw new Error(`[goal-budget] 模型 ${e.model} 的 peakMultiplier 不能小于 1（高峰价不会比非高峰便宜），得到 ${e.peakMultiplier}`)
+    }
+    for (const day of e.holidays) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+        throw new Error(`[goal-budget] 模型 ${e.model} 的 holidays 应为 YYYY-MM-DD，得到 ${day}`)
+      }
+    }
   }
   const unlimited = isUnlimited(profileBudget)
 
@@ -190,7 +211,7 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
    * 顺带让「重启后预算还在」成立：日志里有 `/budget` 事件，状态就能重建。
    */
   // 单价与宿主 Config 同源 —— 客户端显示的数就是阻断判定用的数。
-  const projectionHandle = ctx.sessionProjections.register(createGoalBudgetProjection(pricing))
+  const projectionHandle = ctx.sessionProjections.register(createGoalBudgetProjection(prices))
   // register 可能是异步的；失败不能拖垮插件加载（postmortem 0001 的教训：
   // 加载期的异常会让整个 fiber 失败）。
   void Promise.resolve(projectionHandle).catch((error: unknown) => {
@@ -298,6 +319,14 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
    * —— 这正是 0.5.0 修掉的那一类 bug。用 `Date.now()` 就做不到了。
    */
   ctx.on('session/event', ((session: object, event: { type?: string; time?: number; data?: unknown }) => {
+    if (event?.type === 'request/header') {
+      const cfg = (event.data as { header?: { config?: { provider?: unknown; model?: unknown } } } | undefined)?.header?.config
+      routeBySession.set(session, {
+        provider: typeof cfg?.provider === 'string' ? cfg.provider : undefined,
+        model: typeof cfg?.model === 'string' ? cfg.model : undefined,
+      })
+      return
+    }
     const type = event?.type
     if (type !== 'assistant/message' && type !== 'turn/start' && type !== 'turn/end') return
     const at = typeof event.time === 'number' ? event.time : undefined
@@ -323,7 +352,10 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
       // assistant/message —— 保险：若 turn/start 在归因建立之前就到了，
       // 这里补开这一轮，否则 startedAt 会一直是 undefined，时长恒为 0。
       const opened = at === undefined ? prev : openRound(prev, at)
-      const next = addUsage(opened, data?.usage, pricing, at)
+      const route = routeBySession.get(session)
+      const entry = findPriceByModel(prices, route?.model)
+      if (entry === undefined) spend.unpricedTurns = (spend.unpricedTurns ?? 0) + 1
+      const next = addUsage(opened, data?.usage, entry === undefined ? UNPRICED : pricingAt(entry, at), at)
       spend.rounds.set(own.round, next)
       if (!next.attributable) spend.unattributableTurns += 1
       void session

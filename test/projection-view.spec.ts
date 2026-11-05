@@ -30,12 +30,12 @@ assert.equal(
 )
 
 // 2. 设置过预算：视图是合法对象，同样必须通过
-const set = { budget: { tokens: 500_000, costUsd: 5 }, spent: { tokens: 0, costUsd: 0, unbilledTurns: 0 } }
+const set = { route: null, budget: { tokens: 500_000, costUsd: 5 }, spent: { tokens: 0, costUsd: 0, unbilledTurns: 0, unpricedModels: [] } }
 assert.doesNotThrow(() => wire.viewSchema.parse(wire.view(set)), '❌ 设置预算后的视图没通过 viewSchema')
 
 // 3. 非法值仍被拒绝（说明 schema 没有被放成「什么都收」）
-assert.throws(() => wire.viewSchema.parse({ budget: { tokens: -1, costUsd: 1 }, spent: { tokens: 0, costUsd: 0, unbilledTurns: 0 } }), '❌ 非法形状应被拒绝')
-assert.throws(() => wire.viewSchema.parse({ budget: null, spent: { tokens: 0, costUsd: 0, unbilledTurns: 0 }, extra: 1 }), '❌ 多余字段应被拒绝（strict）')
+assert.throws(() => wire.viewSchema.parse({ budget: { tokens: -1, costUsd: 1 }, spent: { tokens: 0, costUsd: 0, unbilledTurns: 0, unpricedModels: [] } }), '❌ 非法形状应被拒绝')
+assert.throws(() => wire.viewSchema.parse({ budget: null, spent: { tokens: 0, costUsd: 0, unbilledTurns: 0, unpricedModels: [] }, extra: 1 }), '❌ 多余字段应被拒绝（strict）')
 assert.throws(() => wire.viewSchema.parse('not-an-object'), '❌ 非对象应被拒绝')
 
 console.log('✅ projection-view.spec.ts 全部通过（3 组断言）')

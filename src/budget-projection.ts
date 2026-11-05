@@ -1,64 +1,79 @@
 /**
  * 会话的资源状态投影 —— 上限（`/budget`）与实际花费（`assistant/message` 的 usage）。
  *
- * ## 为什么花费也在投影里，而不是让客户端自己算
+ * ## 按会话当前的模型计价
  *
- * 客户端的 `tokenUsage` 投影只给**合计**（uncachedInputTokens / outputTokens /
- * cacheReadTokens / cacheWriteTokens），而正确的计价是**逐条** `max(0, input − cacheRead)`
- * 再累加 —— 因为单条记录的 `inputTokens` 包含 `cacheReadTokens`，但某个会话的
- * cacheRead 合计可能远大于 input 合计（实测一条真实会话：input 4.87M vs cacheRead 400M）。
- * 合计相减会归零，与宿主的数差 15%+。
+ * `request/header` 记录本会话的路由（provider、model）。之后的 `assistant/message`
+ * 归因到这个模型，再按价格表查它的单价。换模型、换网关，计价都跟着走，
+ * 不会沿用另一个模型的价格。
  *
- * 所以这里 fold 每条 usage、用**和宿主 accounting.ts 同一个 costOf** 累加，
- * 客户端只负责显示。**一个数字只有一个来源，就不会有分歧。**
+ * 查不到单价的模型不猜：token 照常计入，费用不计，并把模型名列进 `unpricedModels`。
  */
 
 import { z } from 'zod'
-import { billedTokensOf, costOf, type Pricing } from './accounting.ts'
+import {
+  billedTokensOf, costOf, DEFAULT_PRICES, findPriceByModel, priceDigest, pricingAt,
+  type PriceEntry, type TokenUsage,
+} from './accounting.ts'
 import { parseBudgetCommand } from './budget-command.ts'
 
 /** 客户端读到的形状。 */
-export interface GoalBudgetState {
+export interface GoalBudgetView {
   /** 本会话通过 `/budget` 设的上限；`null` 表示没设过（此时可能仍有 profile 默认）。 */
   readonly budget: { readonly tokens: number; readonly costUsd: number } | null
-  /** 本会话累计花费，用宿主的 costOf 算 —— 与阻断判定同一个口径。 */
+  /** 本会话累计用量与花费。 */
   readonly spent: {
     readonly tokens: number
     readonly costUsd: number
     /** 适配器没报 usage 的 turn 数（这些消费无法归因）。 */
     readonly unbilledTurns: number
+    /** 用过但没有单价的模型（`provider/model`）；它们的费用没有计入 costUsd。 */
+    readonly unpricedModels: readonly string[]
   }
 }
 
-// nonnegative：上限为负没有意义，而且会让 checkBudget 的比值变成负数（静默失效）。
+/** 投影状态：视图加上当前路由。路由是内部状态，不送给客户端。 */
+export interface GoalBudgetState extends GoalBudgetView {
+  readonly route: { readonly provider: string | undefined; readonly model: string | undefined } | null
+}
+
 const budgetSchema = z.object({ tokens: z.number().nonnegative(), costUsd: z.number().nonnegative() }).strict()
 const spentSchema = z.object({
   tokens: z.number().nonnegative(),
   costUsd: z.number().nonnegative(),
   unbilledTurns: z.number().int().nonnegative(),
+  unpricedModels: z.array(z.string()),
 }).strict()
-
-/** ★ 必须 nullable：没设过 `/budget` 时 budget 是 null，DSH 读历史会 parse 这个值。 */
-const stateSchema = z.object({ budget: z.nullable(budgetSchema), spent: spentSchema }).strict()
-
-/** 与该投影配套的单价 —— 与宿主 Config 的默认值一致。 */
-export const DEFAULT_PRICING: Pricing = {
-  inputPerMillion: 0.15,
-  outputPerMillion: 0.6,
-  cacheReadPerMillion: 0.003,
-}
+const viewSchema = z.object({ budget: z.nullable(budgetSchema), spent: spentSchema }).strict()
+const routeSchema = z.object({ provider: z.string().optional(), model: z.string().optional() }).strict()
+const stateSchema = z.object({
+  budget: z.nullable(budgetSchema),
+  spent: spentSchema,
+  route: z.nullable(routeSchema),
+}).strict()
 
 const EMPTY: GoalBudgetState = {
   budget: null,
-  spent: { tokens: 0, costUsd: 0, unbilledTurns: 0 },
+  spent: { tokens: 0, costUsd: 0, unbilledTurns: 0, unpricedModels: [] },
+  route: null,
+}
+
+/** 加入一个未定价的模型名；保持排序去重，同一份日志得到同一个数组。 */
+function addUnpriced(list: readonly string[], key: string): readonly string[] {
+  return list.includes(key) ? list : [...list, key].sort()
+}
+
+/** 路由的显示名；缺失的字段显式标出，而不是留空。 */
+function routeKey(route: GoalBudgetState['route']): string {
+  return `${route?.provider ?? 'unknown-provider'}/${route?.model ?? 'unknown-model'}`
 }
 
 /**
  * 构造投影定义。
  *
- * @param pricing - 与宿主 Config 同源的单价；改变它必须同时 bump stateVersion。
+ * @param prices - 价格表；改变它会改变 stateVersion，旧缓存随之重建。
  */
-export function createGoalBudgetProjection(pricing: Pricing = DEFAULT_PRICING) {
+export function createGoalBudgetProjection(prices: readonly PriceEntry[] = DEFAULT_PRICES) {
   return {
     key: 'goalBudget',
     stateSchema,
@@ -68,59 +83,68 @@ export function createGoalBudgetProjection(pricing: Pricing = DEFAULT_PRICING) {
     },
 
     /**
-     * 只关心两类事件，其余**必须返回同一个引用**（框架要求，否则触发下游重算）。
+     * 只关心四类事件；其余**必须返回同一个引用**（框架要求，否则触发下游重算）。
      */
-    apply(state: GoalBudgetState, event: { type?: string; data?: unknown }): GoalBudgetState {
+    apply(state: GoalBudgetState, event: { type?: string; time?: number; data?: unknown }): GoalBudgetState {
       const data = event?.data as Record<string, unknown> | undefined
 
-      // ── ① /budget 命令 ──
+      // ── ① 路由：记下本会话当前用的模型 ──
+      if (event?.type === 'request/header') {
+        const cfg = (data?.['header'] as { config?: { provider?: unknown; model?: unknown } } | undefined)?.config
+        const provider = typeof cfg?.provider === 'string' ? cfg.provider : undefined
+        const model = typeof cfg?.model === 'string' ? cfg.model : undefined
+        if (state.route?.provider === provider && state.route?.model === model) return state
+        return { ...state, route: { provider, model } }
+      }
+
+      // ── ② /budget 命令 ──
       if (event?.type === 'command/run') {
         if (data?.['name'] !== 'budget') return state
         const parsed = parseBudgetCommand(typeof data['args'] === 'string' ? data['args'] : '')
         switch (parsed.kind) {
           case 'set':
-            return { budget: { tokens: parsed.budget.tokens, costUsd: parsed.budget.costUsd }, spent: state.spent }
+            return { ...state, budget: { tokens: parsed.budget.tokens, costUsd: parsed.budget.costUsd } }
           case 'clear':
-            return state.budget === null ? state : { budget: null, spent: state.spent }
+            return state.budget === null ? state : { ...state, budget: null }
           default:
             return state
         }
       }
 
-      // ── ② 模型消费 ──
+      // ── ③ 模型消费：按当前路由的模型计价 ──
       if (event?.type === 'assistant/message') {
-        const usage = data?.['usage'] as
-          | { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number; reasoningTokens?: number }
-          | undefined
-
+        const usage = data?.['usage'] as TokenUsage | undefined
+        const spent = state.spent
         if (usage === undefined) {
           // 适配器没报 usage —— 明确记为不可归因，不猜（失败模式 #4）
+          return { ...state, spent: { ...spent, unbilledTurns: spent.unbilledTurns + 1 } }
+        }
+        const tokens = spent.tokens + billedTokensOf(usage)
+        const entry = findPriceByModel(prices, state.route?.model)
+        if (entry === undefined) {
+          // 没有单价：token 计入，费用不计，并列出模型名。不用别的模型的价格去猜。
           return {
-            budget: state.budget,
-            spent: { ...state.spent, unbilledTurns: state.spent.unbilledTurns + 1 },
+            ...state,
+            spent: { ...spent, tokens, unpricedModels: addUnpriced(spent.unpricedModels, routeKey(state.route)) },
           }
         }
-
         return {
-          budget: state.budget,
-          spent: {
-            tokens: state.spent.tokens + billedTokensOf(usage),
-            costUsd: state.spent.costUsd + costOf(usage, pricing),
-            unbilledTurns: state.spent.unbilledTurns,
-          },
+          ...state,
+          spent: { ...spent, tokens, costUsd: spent.costUsd + costOf(usage, pricingAt(entry, event.time)) },
         }
       }
 
       return state
     },
 
-    /** 客户端视图：状态本身就是纯 JSON，原样送出。 */
+    /** 客户端视图：去掉内部路由，其余原样送出。 */
     wire: {
-      viewSchema: stateSchema,
-      view: (state: GoalBudgetState): GoalBudgetState => state,
+      viewSchema,
+      view: (state: GoalBudgetState): GoalBudgetView => ({ budget: state.budget, spent: state.spent }),
     },
 
-    stateVersion: 3,
+    /** 价格表的摘要参与版本号：价格变了，持久化的旧缓存会被丢弃并重算。 */
+    stateVersion: 5_000_000 + priceDigest(prices),
   } as const
 }
 
@@ -128,7 +152,7 @@ export function createGoalBudgetProjection(pricing: Pricing = DEFAULT_PRICING) {
 //   模板来自 packages/goal/goal/src/types.ts:128-137。
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionMap {
-    /** 本会话的资源上限与实际花费；花费与阻断判定同一个口径。 */
-    goalBudget: GoalBudgetState
+    /** 本会话的资源上限与实际花费；花费按会话当前模型计价。 */
+    goalBudget: GoalBudgetView
   }
 }

@@ -51,13 +51,17 @@ const ctx = {
 mod.apply(ctx as never, {
   // profile 默认：1 美元
   budget: { tokens: 0, costUsd: 1, wallClockMs: 0 },
-  pricing: { inputPerMillion: 0.15, outputPerMillion: 0.6, cacheReadPerMillion: 0.003 },
+  prices: [],
   onExceed: 'block',
   warnAtRatio: 0.8,
 })
 
 const fire = (e: string, ...a: unknown[]) => { for (const fn of handlers.get(e) ?? []) fn(...a) }
 const agent = {}
+// 同一个会话对象贯穿全部事件（宿主里它是稳定的）。
+const session = {}
+// 会话的请求头：计价按它查模型的单价。没有它，用量会被当成未定价、费用为 0。
+fire('session/event', session, { type: 'request/header', data: { header: { config: { provider: 'deepseek', model: 'deepseek-flash' } } } })
 
 // ── 1. 命令注册了 ──
 assert.ok(commands['budget'], '❌ /budget 没有注册')
@@ -75,13 +79,13 @@ assert.ok(set.text!.includes('$0.01'), `❌ 应确认设为 $0.01，实际: ${se
 
 // ── 4. ★ 覆盖真的生效了：现在 $0.01 就该被突破 ──
 fire('agent/inbox/claimed', { agent, turn: 1, message: { source: { kind: 'goal', goalId: 'goal-A', round: 1 } } })
-fire('session/event', {}, { type: 'assistant/message', data: { turn: 1, usage: { inputTokens: 100000, outputTokens: 5000 } } })
+fire('session/event', session, { type: 'assistant/message', data: { turn: 1, usage: { inputTokens: 100000, outputTokens: 5000 } } })
 
 assert.equal(blocked.length, 1, `❌ 会话覆盖没生效（期望 1 次阻断，实际 ${blocked.length}）`)
 assert.equal(blocked[0]!.reason.code, 'budget-exceeded')
 
 // ── 5. 去重：同一 goal 再超也只阻断一次 ──
-fire('session/event', {}, { type: 'assistant/message', data: { turn: 1, usage: { inputTokens: 500000, outputTokens: 9000 } } })
+fire('session/event', session, { type: 'assistant/message', data: { turn: 1, usage: { inputTokens: 500000, outputTokens: 9000 } } })
 assert.equal(blocked.length, 1, '❌ 重复阻断了')
 
 // ── 6. 显示用量 ──
@@ -97,7 +101,7 @@ assert.ok(cleared.text!.includes('$1'), `❌ 应回到 profile 默认 $1，实�
 // ── 8. ★ 清除之后不再按 $0.01 阻断（不会误杀）──
 blocked.length = 0
 fire('agent/inbox/claimed', { agent, turn: 2, message: { source: { kind: 'goal', goalId: 'goal-A', round: 2 } } })
-fire('session/event', {}, { type: 'assistant/message', data: { turn: 2, usage: { inputTokens: 100000, outputTokens: 5000 } } })
+fire('session/event', session, { type: 'assistant/message', data: { turn: 2, usage: { inputTokens: 100000, outputTokens: 5000 } } })
 assert.equal(blocked.length, 0, `❌ 清除覆盖后仍在按旧预算阻断（误杀）`)
 
 // ── 9. 非法输入报错而不是崩 ──

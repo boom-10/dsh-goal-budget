@@ -423,7 +423,25 @@ const view = (k: string) => (k === 'goalBudget' ? HOSTED : undefined)
   activeLocale = 'zh'
 }
 
-console.log('✅ client-pill.spec.ts 全部通过（12 组断言）')
+// ── 13. 未定价模型：面板列出它的名字，并说明费用没有计入 ──
+{
+  remount()
+  activeLocale = 'en'
+  const unpricedView = {
+    budget: null,
+    spent: { tokens: 1234, costUsd: 0, unbilledTurns: 0, unpricedModels: ['a/claude-sonnet'] },
+  }
+  const useUnpriced = (k: string) => (k === 'goalBudget' ? unpricedView : undefined)
+  clickPill(render(Pill, { useProjection: useUnpriced }) as El)
+  const opened = render(Pill, { useProjection: useUnpriced }) as El
+  const panel = findEl(opened, n => n.props['role'] === 'dialog')
+  assert.ok(panel, '❌ 找不到面板')
+  const text = textOf(panel)
+  assert.match(text, /claude-sonnet/, `❌ 面板应列出未定价的模型：${text}`)
+  assert.match(text, /cost is not counted/, `❌ 应说明费用没有计入：${text}`)
+}
+
+console.log('✅ client-pill.spec.ts 全部通过（13 组断言）')
 console.log('   - 显示宿主给的数，不自己重算')
 console.log('   - 用宿主的 Pill 原语，带 onClick / aria-haspopup / aria-expanded')
 console.log('   - 点击后出现 role=dialog 明细面板')

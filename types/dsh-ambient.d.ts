@@ -37,6 +37,8 @@ declare module '@deepseek-ai/schemastery' {
     boolean(): Schema<boolean>
     union<T extends readonly Schema<unknown>[]>(variants: T): Schema<Infer<T[number]>>
     const<T extends string | number | boolean>(value: T): Schema<T>
+    /** 出处：node_modules/@deepseek-ai/schemastery/lib/types/index.d.ts:72 —— 元素匹配 inner 的数组。 */
+    array<X extends Schema<unknown>>(inner: X): Schema<Infer<X>[]>
   }
 
   const z: Schemastery
