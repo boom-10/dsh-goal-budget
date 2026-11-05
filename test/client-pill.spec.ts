@@ -478,8 +478,10 @@ const view = (k: string) => (k === 'goalBudget' ? HOSTED : undefined)
 {
   remount()
   activeLocale = 'en'
-  clickPill(render(Pill, { useProjection: () => null }) as El)
-  const opened = render(Pill, { useProjection: () => ({ budget: null, spent: { tokens: 1, costUsd: 0.01, currency: 'USD', unbilledTurns: 0, unpricedModels: [], models: [] } }) }) as El
+  const view = { budget: null, spent: { tokens: 1, costUsd: 0.01, currency: 'USD', unbilledTurns: 0, unpricedModels: [], models: [] } }
+  const useView = (k: string) => (k === 'goalBudget' ? view : undefined)
+  clickPill(render(Pill, { useProjection: useView }) as El)
+  const opened = render(Pill, { useProjection: useView }) as El
   const panel = findEl(opened, n => n.props['role'] === 'dialog')
   assert.ok(panel, '❌ 找不到面板')
   const style = (panel.props['style'] ?? {}) as Record<string, unknown>
