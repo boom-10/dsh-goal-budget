@@ -1,0 +1,49 @@
+name: publish
+
+# 发版 = 推一个 tag，仅此而已。
+#
+# 走 npm 的 trusted publishing：仓库里**不存任何 token**。GitHub 为这次运行签发一个
+# 短时效的 OIDC 令牌，npm 校验「它确实来自这个仓库的这个 workflow 文件」，然后
+# 为包附上 provenance 存证。因此不需要 NPM_TOKEN，也没有可泄漏的长期密钥。
+#
+# 前提：本 workflow 已在 npm 的包设置里登记为 trusted publisher
+# （包设置页 → Trusted Publisher → GitHub Actions，填仓库 boom-10/dsh-goal-budget
+# 与本文件名 publish.yml）。两者任一处不匹配，发布就会被拒。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC 交换只需要这一个权限
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      # 防止「tag 打了 v0.10.2、包里却写着别的版本」这种事故。
+      - name: tag 必须与 package.json 的版本一致
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          echo "tag=$tag  package.json=$pkg"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag $GITHUB_REF_NAME 与 package.json 的 $pkg 不一致，已中止"
+            exit 1
+          fi
+
+      - run: npm ci
+
+      # 这里不重复写测试步骤：`npm publish` 会先跑 prepublishOnly，
+      # 也就是 typecheck && test（11 个 spec）&& build。任一步失败都不会上传任何东西。
+      - run: npm publish --provenance --access public
