@@ -1,5 +1,7 @@
 # dsh-goal-budget
 
+[![开放插件市场](https://img.shields.io/endpoint?url=https%3A%2F%2Fdshopen.org%2Fbadge%2Fdsh-goal-budget.json%3Flang%3Dzh)](https://dshopen.org/plugins/dsh-goal-budget/)
+
 > 给 DSH 的长任务目标设一个 token / 费用上限。**超了就把它停下** —— 不是只给你看个数字。
 
 ![点开 pill 后的花费明细](docs/panel.png)
@@ -78,12 +80,16 @@ ctx.goals.block(agent, { id, revision }, {
 
 ## 安装
 
+也可以直接在 [开放插件市场](https://dshopen.org/plugins/dsh-goal-budget/) 里搜 **Goal Budget** 安装（已收录、已审核）。
+
 ```sh
 dsh plugin --profile desktop add dsh-goal-budget                 # npm 源
 dsh plugin --profile desktop add github:boom-10/dsh-goal-budget  # GitHub 源
 ```
 
 装完**重启 DSH**（插件的宿主半边和客户端半边都在启动时加载）。
+
+**兼容范围**：已在 DSH `0.2.1-rc.5` 上自测，`package.json` 里声明 `engines.dsh`；Node 需 ≥22。
 
 `dsh plugin` 会把参数转发给 profile 目录里的 `pnpm`，所以 git 引用、本地路径都能用。**包名形式由你的 npm registry 决定解析结果**：如果本机默认 registry 是公司内网代理、而它还没同步到这个包，`add dsh-goal-budget` 会报 `ERR_PNPM_NO_VERSIONS`（作者本机就踩到了：默认 registry 是公司的代理）——这时改用上面的 GitHub 源即可。反过来，`...@0.10.0` 这种带版本号的形式在两种源上都**不可用**，别写。
 

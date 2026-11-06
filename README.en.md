@@ -1,5 +1,7 @@
 # dsh-goal-budget
 
+[![Open Plugin Market](https://img.shields.io/endpoint?url=https%3A%2F%2Fdshopen.org%2Fbadge%2Fdsh-goal-budget.json%3Flang%3Den)](https://dshopen.org/plugins/dsh-goal-budget/)
+
 > A resource budget gate for DeepSeek Harness goals. When the budget runs out it **blocks the goal** — it does not just show you a number.
 
 ![The spend breakdown, opened from the pill](docs/panel.png)
@@ -87,12 +89,16 @@ Durations use only the timestamp each session event already carries (`SessionEve
 
 ## Install
 
+Or search **Goal Budget** in the [Open Plugin Market](https://dshopen.org/plugins/dsh-goal-budget/) (listed and reviewed).
+
 ```sh
 dsh plugin --profile desktop add dsh-goal-budget                 # from npm
 dsh plugin --profile desktop add github:boom-10/dsh-goal-budget  # from GitHub
 ```
 
 Then **restart DSH** — both halves of the plugin load at boot.
+
+**Compatibility**: tested on DSH `0.2.1-rc.5`, declared via `engines.dsh` in `package.json`; Node >=22.
 
 `dsh plugin` forwards to `pnpm` inside the profile directory, so a local path works too. **The bare-name form resolves through your npm registry**: if your default registry is an internal proxy that has not mirrored this package yet, `add dsh-goal-budget` fails with `ERR_PNPM_NO_VERSIONS` (the author hit exactly that — this machine's default registry is a company proxy); use the GitHub form there. A pinned form such as `...@0.10.0` does **not** work with either source, so do not use it.
 
