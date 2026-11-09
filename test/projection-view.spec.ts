@@ -209,8 +209,10 @@ function fold(def: ReturnType<typeof createGoalBudgetProjection>, events: Array<
 // ── 9. 版本号：绑定官方日历的内容，日历变了旧缓存必须重建 ──
 {
   const def = createGoalBudgetProjection()
-  // 基数 7_000_000：状态形状变过（unpriced 带 token 数、视图加分模型明细），改动形状必须再递增。
-assert.equal(def.stateVersion, 7_000_000 + digestOf(OFF_DAYS.join(',')), '❌ 版本号应绑定日历内容')
+  // 基数：状态形状每变一次就递增（7_000_000 → unpriced 带 token 数、视图加分模型明细；
+  //       7_000_001 → 新增 children 计数：旧缓存里该字段是 0，而「派生过几个子代理」
+  //       只能靠重新 fold 日志得到，不提升版本号历史会话会永远显示 0）。
+  assert.equal(def.stateVersion, 7_000_001 + digestOf(OFF_DAYS.join(',')), '❌ 版本号应绑定日历内容')
 }
 
 console.log('✅ projection-view.spec.ts 全部通过（9 组断言）')

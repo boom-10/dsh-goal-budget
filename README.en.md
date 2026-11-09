@@ -204,9 +204,31 @@ checkBudget()                                 →  over? → ctx.goals.block()
 
 Attribution is **rebuilt from the session log**, never stored separately — restarting cannot double-count or reset.
 
+### A subagent's usage counts against the same goal
+
+When a goal fans out to subagents, the money is spent in **the subagent's own session**: its `assistant/message` events never appear in the parent's log, so accounting for the parent alone misses that whole block. Measured on the author's machine: 6 subagents spent **28,170,632 tokens** (4.12% of the parent) while the ledger showed 0.
+
+Closing it needs one event the parent already has:
+
+```ts
+'subagent/catalog': { childId: string; childCreatedAt: number; … }
+```
+
+`childId` says who was spawned; `childCreatedAt` is the cut — a child session's log **carries the parent's entire history as an inherited prefix** (same measurement: one subagent had 1474 inherited usage records and only 15 of its own). Without that cut the parent's history is counted a second time and the bill doubles.
+
+Three rules follow:
+
+| Rule | Why |
+|---|---|
+| A subagent's tokens and cost **do** count toward the cap | An uncapped fan-out is exactly the expensive case |
+| A subagent's **elapsed time does not** | it runs *inside* one of the parent's turns; the spans overlap, and adding them counts the same wall time twice |
+| The panel only discloses "N subagents spawned" | subagent usage cannot reach the parent's projection (the client reads the current session only), so the panel does not pretend to know that figure — but the cap does |
+
 ### One number, one source
 
 The pill does not compute cost. It reads it from the same projection the gate uses, so the number you see and the number that blocks can never disagree.
+
+The one place the **scope** differs is stated on the panel: subagent usage (above) counts toward the cap but is not in the panel's figure — the client can only read the current session's projection, and subagents run in their own sessions. The panel discloses the count in a line rather than folding a number it cannot compute into a total.
 
 Pricing follows DSH's `TokenUsage` contract (`packages/llm/llm/src/types.ts:177`):
 
@@ -277,6 +299,8 @@ Known, with current mitigation and what is still unsolved.
 | 16 | Listeners were skipped when the profile set no default budget | a session that set its budget only with /budget reported success and showed numbers in the pill, yet nothing was ever accounted, so warn and block never fired - it looked healthy | - | fixed in 0.9.2: listeners register unconditionally, since a budget can be added at any time |
 | 17 | Attribution matched turn numbers across sessions | with two sessions running, turn numbers repeat, so session B's usage was charged to session A's goal; A could block early and B never saw its own usage | - | fixed in 0.9.2: ownership is keyed by (session, turn); without a session the usage is not attributed |
 | 18 | A gateway priced as if it followed the official peak schedule | with a flat-rate gateway, peak-hour cost is overstated 2x | - | fixed in 0.9.3: the `peakPricing` setting; measured `false` for this gateway |
+| 19 | A subagent's usage never reaches the parent's log | a goal that fans out to subagents has that whole block missing from the ledger - the gate may as well not exist (measured: 6 subagents, 28,170,632 tokens, all uncounted) | - | fixed in 0.10.3: subscribe to `subagent/catalog`, cut at `childCreatedAt`, count what the child spent itself; the inherited prefix is excluded, or the bill doubles |
+| 20 | A provider reports usage with a missing field (e.g. no `outputTokens`) | the ledger becomes `NaN`, and **NaN comparisons are always false** - the budget check returns "under budget" forever while the panel shows `$NaN` | - | fixed in 0.10.3: `addUsage` checks every field is finite and marks the turn unattributable instead (the panel then says how many turns were dropped) |
 
 Number 7 is the one to watch: it fails *silently*. So does number 8. Both were found by testing behaviour rather than checking for absence of errors — the same shape as the harness's own post-mortem 0001, where 178 green tests and 100% line coverage coexisted with a completely non-functional feature.
 

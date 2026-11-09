@@ -61,6 +61,7 @@ window.__ModuleLoader__.load({
         estimatedNote: '≈ 为估算：该模型的单价由账单核对/反解而来，供应商可能对部分请求按不同价格计费（实测有按 1/5 计费的请求）',
         notCounted: '未计价',
         unpriced: '未计价：{models}（费用未计入，请在价格表里配置）',
+        subagents: '本会话派生 {count} 个子代理：它们的用量不在上面的数字里（各自跑在自己的会话），但已计入上限',
         currencyUnknown: '账户币种未识别，费用暂不计入；请在配置里设置 currency（USD 或 CNY）',
         summaryNone: '本会话已花费 {cost}，未设上限',
         summaryCapped: '本会话已花费 {cost}，上限 {limit}，已用 {percent}%',
@@ -80,6 +81,7 @@ window.__ModuleLoader__.load({
         estimatedNote: '≈ marks an estimate: this model\'s rates come from reconciling the provider bill, and the provider may charge some requests differently (requests billed at 1/5 of the standard rate were measured)',
         notCounted: 'not counted',
         unpriced: 'No price for {models}; its cost is not counted (add it to the price table)',
+        subagents: '{count} subagent(s) spawned from this session: their usage is not in the figures above (each runs in its own session) but does count toward the cap',
         currencyUnknown: 'Account currency not detected yet; cost is not counted. Set currency (USD or CNY) in the config.',
         summaryNone: 'Session spend {cost}, no cap set',
         summaryCapped: 'Session spend {cost} of {limit} budget, {percent}% used',
@@ -200,6 +202,18 @@ window.__ModuleLoader__.load({
       return h('div', { style: NOTE }, t('unpriced', { models: models.join(', ') }))
     }
 
+    /**
+     * 子代理披露行。
+     *
+     * 子代理跑在自己的会话里，它的用量进不了本会话的投影，所以**上面的数字里没有它**；
+     * 但宿主记账时把它计入了预算 —— 面板必须说清这两件事，否则用户会以为上限比实际松。
+     */
+    function subagentLine(spent, t) {
+      const n = spent.children
+      if (typeof n !== 'number' || n <= 0) return null
+      return h('div', { style: NOTE, 'data-goal-budget-line': 'subagents' }, t('subagents', { count: n }))
+    }
+
     function GoalBudgetPill(props) {
       const { useProjection, t } = props
       const [open, setOpen] = React.useState(false)
@@ -227,12 +241,13 @@ window.__ModuleLoader__.load({
         layoutKey: spent === null ? 'none'
           : String(spent.tokens) + ':' + String(spent.costUsd) + ':'
             + String(spent.models ? spent.models.length : 0) + ':' + String(spent.unpricedModels ? spent.unpricedModels.length : 0)
-            + ':' + String(spent.unbilledTurns),
+            + ':' + String(spent.unbilledTurns) + ':' + String(spent.children ? spent.children : 0),
       })
       useDismissOnOutsidePointer(rootRef, open, setOpen)
 
       if (spent === null) return null
-      if (spent.costUsd === 0 && spent.tokens === 0 && spent.unbilledTurns === 0) return null
+      // 子代理披露行也算内容：只有它非零时同样要显示 pill。
+      if (spent.costUsd === 0 && spent.tokens === 0 && spent.unbilledTurns === 0 && !(spent.children > 0)) return null
 
       // 命中哪一维用哪一维 —— 与宿主 checkBudget「谁先到算谁」一致。
       let ratio = null
@@ -291,6 +306,7 @@ window.__ModuleLoader__.load({
               h('div', { style: NOTE }, t('provenance')),
               unpricedLine(spent, t),
               estimatedLine(spent, t),
+              subagentLine(spent, t),
             ),
             document.body,
           )

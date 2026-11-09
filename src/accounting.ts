@@ -50,6 +50,16 @@ export type GoalSpend = {
   goalId: string
   /** round → 该轮的消费 */
   rounds: Map<number, TurnSpend>
+  /**
+   * 本目标派出去的子代理（subagent）产生的用量汇总。
+   *
+   * ★ 为什么单独放、不塞进 `rounds`：
+   *   1. `rounds.size` 是**用户可见的「跑了多少轮」**，塞一个哨兵轮会把它加一；
+   *   2. 时长**不能**相加 —— 子代理是在父会话某一轮**之内**跑的，时间重叠，
+   *      两个轮次相加会把同一段时间算两遍。金额与 token 是相加的，时间不是。
+   * 所以这里只累计 token 与费用，`totalsOf` 不从这里取 wallClockMs。
+   */
+  children?: TurnSpend
   /** 无法归因的 turn 数（适配器没报 usage） */
   unattributableTurns: number
   /** 没有单价的 turn 数：token 计入，费用不计。 */
@@ -118,6 +128,19 @@ export function addUsage(prev: TurnSpend, usage: TokenUsage | undefined, p: Pric
     // 适配器没报 usage —— 明确记为不可归因，不猜（失败模式 #4）
     return { ...prev, attributable: false, endedAt: end }
   }
+  // usage 来自 provider 响应（wire 边界）：字段缺失或非数字会让账本变成 NaN，
+  // 而 **NaN 的比较恒为 false** —— 预算判定会彻底不触发，面板还会显示 $NaN，
+  // 属于最坏的一类静默失效。宁可把这一轮标成「不可归因」（面板会明说少算了 N 轮）。
+  const fields = [
+    usage.inputTokens,
+    usage.outputTokens,
+    usage.cacheReadTokens ?? 0,
+    usage.cacheWriteTokens ?? 0,
+    usage.reasoningTokens ?? 0,
+  ]
+  if (!fields.every(n => typeof n === 'number' && Number.isFinite(n))) {
+    return { ...prev, attributable: false, endedAt: end }
+  }
   // 显式列出每个字段 —— 不用 spread。
   // 理由：TokenUsage 的字段是可选的，TurnSpend 的是必需的，
   // spread 会把「可选」原样带过去，类型对不上（而且真的会漏字段）。
@@ -166,6 +189,13 @@ export function totalsOf(spend: GoalSpend): {
     if (t.startedAt !== undefined && t.endedAt !== undefined) {
       wallClockMs += Math.max(0, t.endedAt - t.startedAt)
     }
+  }
+  // 子代理的用量计入 token 与费用，**不计入时长**：它在父会话某一轮之内运行，
+  // 那段时间已经算在父会话的那一轮里了（见 GoalSpend.children 的说明）。
+  const child = spend.children
+  if (child) {
+    tokens += child.inputTokens + child.cacheReadTokens + child.cacheWriteTokens + child.outputTokens
+    costUsd += child.costUsd
   }
   return { tokens, costUsd, rounds: spend.rounds.size, wallClockMs }
 }

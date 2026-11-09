@@ -164,6 +164,27 @@ const ownershipBySession = new WeakMap<object, Map<number, { goalId: string; rou
 /** 每个会话当前请求头的路由（provider、model）：计价按它查模型的单价。 */
 const routeBySession = new WeakMap<object, { provider?: string; model?: string }>()
 
+/**
+ * 子代理（subagent）的用量该记到哪个 goal。
+ *
+ * ★ 为什么需要这张表（OBSERVED，0.10.3 修）：子代理跑在**自己的会话**里，
+ *   它的 `assistant/message` 用量不会出现在父会话的日志中 —— 实测本仓库作者的
+ *   6 个子代理共 28,170,632 token，父会话账本里为 0，金额与 token 双双漏计。
+ *   而 `subagent/catalog`（父会话自己的事件，带 `childId` 与 `childCreatedAt`）
+ *   恰好给出了补上这段归因所需的两个信息。
+ *
+ * 键是子会话 id：子代理的事件带着它自己的 session 对象进来，用 `session.id` 反查。
+ */
+const childOwnerBySessionId = new Map<string, { goalId: string; round: number; agent: object; createdAt: number }>()
+
+/**
+ * 每个会话最近一次见到的 turn。
+ *
+ * `subagent/catalog` **不带 turn**，所以无法直接知道是哪一轮派生的；用同一会话上
+ * 最近一个带 turn 的事件来定位。取不到就宁可不归因（见下面 catalog 分支）。
+ */
+const lastTurnBySession = new WeakMap<object, number>()
+
 type Ledger = {
   /** goalId → 累计消费 */
   byGoal: Map<string, GoalSpend>
@@ -201,6 +222,14 @@ const emptyTurn = (turn: number): TurnSpend => ({
   costUsd: 0,
   attributable: true,
 })
+
+/**
+ * 子代理用量的哨兵轮号：它不属于本会话的任何一轮。
+ *
+ * 只是 `TurnSpend.turn` 这个必填字段的占位值 —— 汇总存在 `GoalSpend.children` 里，
+ * 不进 `rounds`（否则用户看到的轮数会虚增，时长也会被重复相加）。
+ */
+const CHILD_TURN = -1
 
 export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
   // ── 存储方案 C：profile 默认 + 会话覆盖 ──
@@ -286,6 +315,22 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
     if (fromLog === undefined || fromLog === null) return undefined
     routeBySession.set(session, fromLog)
     return fromLog
+  }
+
+  /**
+   * 按「会话当前路由 + 事件时间」取单价。
+   *
+   * ★ 父会话与子代理两条记账路径共用这一个函数：计价规则若各写一份，
+   *   迟早只改一处（0.5.0 客户端与宿主各算一遍的同类错误）。
+   * 峰谷只对内置 DeepSeek 价目有意义；配置单价表的模型按固定价（见 README 校准一节）。
+   */
+  const pricingFor = (session: object, at: number | undefined): Pricing | undefined => {
+    const model = resolvePriceKey(routeOf(session)?.model, config.modelAliases, config.modelPrices)
+    if (model === undefined || currency === undefined || at === undefined) return undefined
+    const band: Band = model === 'deepseek-flash' || model === 'deepseek-v4-pro'
+      ? bandFor(at, config.peakPricing)
+      : 'offPeak'
+    return pricingOf(model, currency, band, config.modelPrices)
   }
 
   // 启动日志。
@@ -413,11 +458,52 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
       return
     }
     const type = event?.type
-    if (type !== 'assistant/message' && type !== 'turn/start' && type !== 'turn/end') return
     const at = typeof event.time === 'number' ? event.time : undefined
+
+    // ── 子代理目录（父会话自己的事件）：记下「谁被派生、何时派生」 ──
+    //
+    // DSH 在派生处发 `subagent/catalog`，带 `childId` 与 `childCreatedAt`。
+    // 修复 Agent 级预算所需的两个信息，这里都有了。
+    if (type === 'subagent/catalog') {
+      const d = event.data as { childId?: unknown; childCreatedAt?: unknown } | undefined
+      if (typeof d?.childId !== 'string' || typeof d?.childCreatedAt !== 'number') return
+      // catalog 不带 turn：用本会话最近一个带 turn 的事件定位是**哪一轮**派生的。
+      const lastTurn = lastTurnBySession.get(session)
+      const owner = lastTurn === undefined ? undefined : ownershipBySession.get(session)?.get(lastTurn)
+      if (owner === undefined) {
+        ctx.logger.warn(`[goal-budget] 子代理 ${d.childId} 定位不到所属轮次，它的用量不会计入本目标`)
+        return
+      }
+      childOwnerBySessionId.set(d.childId, {
+        goalId: owner.goalId, round: owner.round, agent: owner.agent, createdAt: d.childCreatedAt,
+      })
+      return
+    }
+
+    if (type !== 'assistant/message' && type !== 'turn/start' && type !== 'turn/end') return
     const data = event.data as { turn?: number; usage?: never } | undefined
     const turn = data?.turn
     if (typeof turn !== 'number') return
+    lastTurnBySession.set(session, turn)
+
+    // ── 子代理会话：它花的钱记到派生它的那个目标上 ──
+    //
+    // ★ 关键是 `at < childCreatedAt` 这个条件：子会话的日志**包含继承自父会话的整段历史**
+    //   （实测某个子代理 1474 条 usage 是继承的，只有 15 条是它自己产生的）。
+    //   不按创建时刻切分，就会把父会话的历史重复计一遍。
+    const childOwner = childOwnerBySessionId.get((session as { id?: string }).id ?? '')
+    if (childOwner !== undefined) {
+      // 子代理不贡献时长：它跑在父会话那一轮**之内**（见 GoalSpend.children）。
+      if (type !== 'assistant/message' || at === undefined || at < childOwner.createdAt) return
+      const childLedger = ledgerFor(childOwner.agent)
+      const childSpend = spendFor(childLedger, childOwner.goalId)
+      const childPricing = pricingFor(session, at)
+      if (childPricing === undefined) childSpend.unpricedTurns = (childSpend.unpricedTurns ?? 0) + 1
+      childSpend.children = addUsage(childSpend.children ?? emptyTurn(CHILD_TURN), data?.usage, childPricing ?? UNPRICED, at)
+      const { budget: childBudget } = resolveBudget(childOwner.agent)
+      evaluate(ctx, childLedger, childOwner.goalId, childOwner.agent, costInCurrency(childBudget, currency), config.onExceed, config.warnAtRatio ?? 0)
+      return
+    }
 
     // 归属按 (会话, turn) 查 —— 不跨会话扫描（见 ownershipBySession 的说明）。
     const owned = ownershipBySession.get(session)?.get(turn)
@@ -440,11 +526,7 @@ export function apply(ctx: Ctx, config: GoalBudgetConfig): void {
       // assistant/message —— 保险：若 turn/start 在归因建立之前就到了，
       // 这里补开这一轮，否则 startedAt 会一直是 undefined，时长恒为 0。
       const opened = at === undefined ? prev : openRound(prev, at)
-      const route = routeOf(session)
-      const model = resolvePriceKey(route?.model, config.modelAliases, config.modelPrices)
-      const pricing = model === undefined || currency === undefined || at === undefined
-        ? undefined
-        : pricingOf(model, currency, model === 'deepseek-flash' || model === 'deepseek-v4-pro' ? bandFor(at, config.peakPricing) : 'offPeak', config.modelPrices)
+      const pricing = pricingFor(session, at)
       if (pricing === undefined) spend.unpricedTurns = (spend.unpricedTurns ?? 0) + 1
       const next = addUsage(opened, data?.usage, pricing ?? UNPRICED, at)
       spend.rounds.set(own.round, next)

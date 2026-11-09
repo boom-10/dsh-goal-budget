@@ -31,6 +31,11 @@ export interface GoalBudgetView {
       /** 金额是估算（供应商按请求变价），面板用 ≈ 标出。 */
       readonly estimated: boolean
     }[]
+    /**
+     * 本会话派生过多少个子代理。它们的用量**不在上面的数字里**
+     * （子代理跑在自己的会话，本投影看不到），但**已经计入预算上限**。
+     */
+    readonly children: number
   }
 }
 
@@ -54,6 +59,15 @@ export interface GoalBudgetState {
   /** 不能计价的（模型名, token 数）；token 计入总量，费用不计。 */
   readonly unpriced: readonly { readonly key: string; readonly tokens: number }[]
   readonly buckets: readonly Bucket[]
+  /**
+   * 本会话派生过多少个子代理（`subagent/catalog` 计数）。
+   *
+   * 只记**个数**，不记它们的用量：子代理跑在自己的会话里，它的 `assistant/message`
+   * 不会进入本会话的事件流，所以本投影**看不到**那部分 token。
+   * 用量由宿主记账并计入预算（见 `GoalSpend.children`）—— 面板因此只披露个数，
+   * 不冒充自己知道金额。
+   */
+  readonly children: number
 }
 
 const currencySchema = z.enum(['USD', 'CNY'])
@@ -78,6 +92,9 @@ const stateSchema = z.object({
   unbilledTurns: z.number().int().nonnegative(),
   unpriced: z.array(z.object({ key: z.string(), tokens: z.number().nonnegative() }).strict()),
   buckets: z.array(bucketSchema),
+  // 默认值让「没有这个字段」的旧缓存仍能通过校验；但计数是否完整取决于
+  // 重建，所以这次一并提升了 stateVersion（见文件末尾）。
+  children: z.number().int().nonnegative().default(0),
 }).strict()
 const viewSchema = z.object({
   budget: z.nullable(budgetSchema),
@@ -94,10 +111,11 @@ const viewSchema = z.object({
       priced: z.boolean(),
       estimated: z.boolean(),
     }).strict()),
+    children: z.number().int().nonnegative(),
   }).strict(),
 }).strict()
 
-const EMPTY: GoalBudgetState = { budget: null, route: null, tokens: 0, unbilledTurns: 0, unpriced: [], buckets: [] }
+const EMPTY: GoalBudgetState = { budget: null, route: null, tokens: 0, unbilledTurns: 0, unpriced: [], buckets: [], children: 0 }
 
 /** 累加某个不计价模型的 token 数；按键排序，同一份日志得到同一个数组。 */
 function addUnpriced(
@@ -176,6 +194,7 @@ function viewOf(state: GoalBudgetState, currency: Currency | undefined, prices: 
       models: [...perModel.entries()]
         .map(([model, line]) => ({ model, ...line }))
         .sort((a, b) => b.costUsd - a.costUsd || (a.model < b.model ? -1 : 1)),
+      children: state.children,
     },
   }
 }
@@ -239,7 +258,13 @@ export function createGoalBudgetProjection(options: {
         }
       }
 
-      // ── ③ 模型消费：记入（模型, 峰谷时段）桶 ──
+      // ── ③ 子代理派生：只数个数，用量由宿主记账（见 GoalBudgetState.children） ──
+      if (event?.type === 'subagent/catalog') {
+        if (typeof data?.['childId'] !== 'string') return state
+        return { ...state, children: state.children + 1 }
+      }
+
+      // ── ④ 模型消费：记入（模型, 峰谷时段）桶 ──
       if (event?.type === 'assistant/message') {
         const usage = data?.['usage'] as TokenUsage | undefined
         if (usage === undefined) {
@@ -278,7 +303,9 @@ export function createGoalBudgetProjection(options: {
 
     /** 官方日历的内容参与版本号：日历变了，持久化的旧状态（峰谷已按旧日历分桶）必须重建。 */
     // 7_000_000：状态形状变了（unpriced 带 token 数、视图加分模型明细），旧缓存必须重建。
-    stateVersion: 7_000_000 + digestOf(OFF_DAYS.join(',')),
+    // 7_000_001：新增 children 计数。旧缓存里这个字段是 0，而「派生过几个子代理」只能靠
+    //            重新 fold 日志得到 —— 不提升版本号，历史会话会永远显示 0 个子代理。
+    stateVersion: 7_000_001 + digestOf(OFF_DAYS.join(',')),
   } as const
 }
 
